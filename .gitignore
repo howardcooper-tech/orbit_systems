@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+orbit-tools/.env
+
+# Supabase local / CLI
+supabase/.branches
+supabase/.temp
+supabase/.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+
+# Personal / unrelated (if repo ever sits under Documents)
+BandLab/
+iZotope/
