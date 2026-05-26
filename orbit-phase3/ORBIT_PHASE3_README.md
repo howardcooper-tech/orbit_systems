@@ -32,7 +32,11 @@ Test as `authenticated` JWT in Supabase — **not** service role (service role b
 
 ## Deferred to Phase 3b (optional later)
 
+Operational spec: **[../docs/FIELD_TRIP_15_10_PROTOCOL.md](../docs/FIELD_TRIP_15_10_PROTOCOL.md)** (authoritative for field trips).
+
+- **Field trip 15/10 Chronos** — `15m_Active` search → `10m_Backup_Active` Satellite physical verification (teacher code); Point live alert **only** on `Escalated_Failed`; after-action report to Point at reboarding **always**
 - `fn_archive_stale_data` (Chronos) — archive copy only, no hot DELETE
+- Field-trip / persona RLS (Pin, Node, Drone, chaperone tables)
 - Mesh / rescue / halo auto-triggers
 - `supabase_realtime` publication adds
 - Auto-grounding bus on inspection

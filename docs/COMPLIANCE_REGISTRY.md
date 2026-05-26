@@ -10,6 +10,7 @@ Auditors and district partners ask for **artifacts**, not chat logs. Index what 
 | Deploy manifest | `orbit-tools/manifest.json` | Run order |
 | Deploy runner | `orbit-tools/run-orbit.ps1` | Operator/CI |
 | Stack wiring | `STACK.md` | GitHub ↔ Supabase |
+| Field trip 15/10 protocol | `docs/FIELD_TRIP_15_10_PROTOCOL.md` | Point notify + after-action rules |
 
 ## Run log (fill in per environment)
 

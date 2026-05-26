@@ -148,3 +148,14 @@ Workflow runs `run-orbit.sh` on push to `main` — only after you want automated
 Run `orbit-phase3/PHASE3_VERIFY.sql` in SQL Editor (when added) or checks in Phase 3 README.
 
 Test API as **authenticated** JWT, not service role.
+
+---
+
+## Operational protocols (markdown)
+
+| Doc | When to read |
+|-----|----------------|
+| [docs/FIELD_TRIP_15_10_PROTOCOL.md](./docs/FIELD_TRIP_15_10_PROTOCOL.md) | Field trip missing child — 15 min sweep, 10 min Satellite verify, Point notify rules |
+| [docs/COMPLIANCE_REGISTRY.md](./docs/COMPLIANCE_REGISTRY.md) | Audit evidence index |
+
+Phase 3b SQL should implement these specs; do not change Phase 1–3 files on production without a migration plan.

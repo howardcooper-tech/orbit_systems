@@ -11,8 +11,15 @@ Hardened Postgres core for Orbit Atom: phased schema (1–3), Supabase-hosted DB
 | `orbit-phase3/` | Functions, RLS (Duval Wall), audit, gates |
 | `orbit-tools/` | Manifest-driven deploy (`run-orbit.ps1`) |
 | `supabase/` | CLI project link + optional migrations |
-| `docs/` | Compliance / evidence index |
+| `docs/` | Compliance index + operational protocols |
 | `STACK.md` | **How to link GitHub ↔ Supabase ↔ deploy** |
+
+## Key docs
+
+| Document | Purpose |
+|----------|---------|
+| [docs/FIELD_TRIP_15_10_PROTOCOL.md](./docs/FIELD_TRIP_15_10_PROTOCOL.md) | Field trip missing-child **15/10** timer, Point notification rules, after-action report |
+| [docs/COMPLIANCE_REGISTRY.md](./docs/COMPLIANCE_REGISTRY.md) | Evidence index for auditors / district partners |
 
 ## Quick start (operator)
 
