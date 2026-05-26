@@ -22,6 +22,10 @@ foreach ($item in $docFiles) {
     if (-not (Test-Path -LiteralPath $dstDir)) {
         New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
     }
+    if ((Resolve-Path $src).Path -eq (Resolve-Path $dst -ErrorAction SilentlyContinue).Path) {
+        Write-Host "Skip (same file): $($item.Dst)"
+        continue
+    }
     Copy-Item -LiteralPath $src -Destination $dst -Force
     Write-Host "Copied -> $($item.Dst)"
 }
