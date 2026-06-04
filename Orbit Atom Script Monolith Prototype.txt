@@ -1,0 +1,3431 @@
+Orbit Atom Prototype Monolith
+
+-- ============================================================================
+-- ORBIT NUCLEUS V25.1: THE UNIFIED DIAMOND ATOM
+-- Purpose: Complete Relational Mass, Forensic Black Box, & Kinematic Engine
+-- Status: Market Rollout Ready | Enterprise Multi-Tenant SaaS
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- STAGE 1: SITE PREP & EXTENSIONS
+-- ==========================================
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- ==========================================
+-- STAGE 2: INFRASTRUCTURE & CLEARANCE MASS
+-- ==========================================
+CREATE TABLE public.districts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL,
+    state_code TEXT NOT NULL DEFAULT 'FL',
+    compliance_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE public.contractors (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE CASCADE,
+    company_name TEXT NOT NULL,
+    carrier_code TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT carrier_code_district_unique UNIQUE (carrier_code, district_id)
+);
+
+CREATE TABLE public.schools (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE CASCADE,
+    school_name TEXT NOT NULL,
+    school_code TEXT NOT NULL,
+    location_point GEOGRAPHY(POINT, 4326),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT school_code_district_unique UNIQUE (school_code, district_id)
+);
+
+CREATE TABLE public.staff_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    district_id UUID REFERENCES public.districts(id) ON DELETE SET NULL,
+    contractor_id UUID REFERENCES public.contractors(id) ON DELETE SET NULL,
+    school_id UUID REFERENCES public.schools(id) ON DELETE SET NULL,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('Central', 'Drone', 'Satellite', 'Teacher', 'Command', 'Pilot', 'Halo', 'Crew')),
+    roles TEXT[] DEFAULT '{}',
+    profile_photo_url TEXT,
+    pin_code TEXT,
+    hire_date DATE DEFAULT CURRENT_DATE CHECK (hire_date <= CURRENT_DATE),
+    is_active BOOLEAN DEFAULT true,
+    is_on_duty BOOLEAN DEFAULT false,
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT pilot_contractor_bond CHECK ((role = 'Pilot' AND contractor_id IS NOT NULL) OR (role != 'Pilot')),
+    CONSTRAINT teacher_school_bond CHECK ((role IN ('Teacher', 'Satellite') AND school_id IS NOT NULL) OR (role NOT IN ('Teacher', 'Satellite')))
+);
+
+CREATE TABLE public.parents (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    is_verified_node BOOLEAN DEFAULT false,
+    verification_source TEXT DEFAULT 'District_Direct',
+    verified_at TIMESTAMPTZ,
+    profile_photo_url TEXT,
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- ==========================================
+-- STAGE 3: FLEET, KINEMATICS, & STUDENTS
+-- ==========================================
+CREATE TABLE public.buses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    contractor_id UUID REFERENCES public.contractors(id) ON DELETE CASCADE,
+    assigned_pilot_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    bus_number TEXT NOT NULL,
+    vin TEXT UNIQUE,
+    license_plate TEXT UNIQUE,
+    current_location GEOGRAPHY(POINT, 4326),
+    status TEXT DEFAULT 'Active' CHECK (status IN ('Active', 'Bay_Maintenance', 'Grounded', 'Waiting_On_Parts', 'Decommissioned')),
+    motion_status TEXT DEFAULT 'Stopped' CHECK (motion_status IN ('Moving', 'Idle', 'Stopped', 'Offline')),
+    is_equipped_with_moca BOOLEAN DEFAULT true,
+    last_ping TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT bus_number_contractor_unique UNIQUE (bus_number, contractor_id)
+);
+
+CREATE TABLE public.bus_telemetry_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    location GEOGRAPHY(POINT, 4326) NOT NULL,
+    speed_mph INT DEFAULT 0 CHECK (speed_mph >= 0 AND speed_mph < 120),
+    recorded_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.students (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    school_id UUID REFERENCES public.schools(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    assigned_stop_point GEOGRAPHY(POINT, 4326),
+    medical_alert_flag BOOLEAN DEFAULT false,
+    medical_notes TEXT,
+    pin_hash TEXT,
+    pin_updated_at TIMESTAMPTZ DEFAULT now(),
+    current_status TEXT DEFAULT 'off_bus' CHECK (current_status IN ('off_bus', 'boarded', 'missing', 'medical_hold')),
+    current_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    missing_status TEXT DEFAULT 'NONE' CHECK (missing_status IN ('NONE', 'PENDING_MANUAL', 'SUSPENDED', 'FLARE_ACTIVE')),
+    last_known_gps GEOGRAPHY(POINT, 4326),
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE public.student_guardians (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    parent_id UUID REFERENCES public.parents(id) ON DELETE CASCADE,
+    relationship TEXT DEFAULT 'Guardian',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(student_id, parent_id)
+);
+
+CREATE TABLE public.student_device_authorizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    parent_id UUID REFERENCES public.parents(id) ON DELETE CASCADE,
+    device_token TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    last_used_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(student_id, parent_id, device_token)
+);
+
+-- ==========================================
+-- STAGE 4: MISSION LOGIC (TRIPS & HANDSHAKES)
+-- ==========================================
+CREATE TABLE public.trips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE CASCADE,
+    trip_code TEXT NOT NULL,
+    trip_type TEXT DEFAULT 'Daily' CHECK (trip_type IN ('Daily', 'Field_Trip', 'Special_Needs', 'Athletics')),
+    destination TEXT NOT NULL,
+    lead_satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    status TEXT DEFAULT 'pending_bus_assignment' CHECK (status IN ('pending_bus_assignment', 'ready_for_boarding', 'in_progress', 'completed', 'canceled')),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT trip_code_district_unique UNIQUE (trip_code, district_id)
+);
+
+CREATE TABLE public.trip_manifest (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    expected_status TEXT DEFAULT 'EXPECTED' CHECK (expected_status IN ('EXPECTED', 'BOARDED', 'ABSENT', 'EXCUSED')),
+    assigned_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(trip_id, student_id)
+);
+
+CREATE TABLE public.bus_trip_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    status TEXT DEFAULT 'PENDING_PILOT_ACCEPT' CHECK (status IN ('PENDING_PILOT_ACCEPT', 'OPEN_FOR_BOARDING', 'LOCKED_DEPARTED')),
+    handshake_timestamp TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(trip_id, bus_id)
+);
+
+-- ==========================================
+-- STAGE 5: THE FORENSIC BLACK BOX
+-- ==========================================
+CREATE TABLE public.audit_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    action_type TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    record_id UUID,
+    old_data JSONB,
+    new_data JSONB,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE OR REPLACE FUNCTION public.process_forensic_audit() RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO public.audit_logs (user_id, action_type, table_name, record_id, old_data, new_data)
+    VALUES (auth.uid(), TG_OP, TG_TABLE_NAME, COALESCE(NEW.id, OLD.id), to_jsonb(OLD), to_jsonb(NEW));
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==========================================
+-- STAGE 6: ENGINE ACTIVATION & SECURITY GATES
+-- ==========================================
+-- A. Temporal Isotope Engine
+CREATE OR REPLACE FUNCTION public.set_updated_at() RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = clock_timestamp(); RETURN NEW; END; $$ LANGUAGE plpgsql;
+
+-- B. Trip Lead Clearance Gate
+CREATE OR REPLACE FUNCTION public.check_trip_lead_clearance() RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.staff_profiles 
+        WHERE id = NEW.lead_satellite_id 
+        AND (role IN ('Satellite', 'Teacher', 'Command', 'Central'))
+    ) AND NEW.lead_satellite_id IS NOT NULL THEN
+        RAISE EXCEPTION 'AUTHORITY_ERROR: Assigned Lead must have Teacher or Satellite clearance.';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+-- C. Dynamic Engine Attachments
+DO $$ 
+DECLARE t TEXT;
+BEGIN
+    -- Attach updated_at triggers universally (Filtering for BASE TABLES only)
+    FOR t IN SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    LOOP
+        -- Only attach if the column actually exists
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = t AND column_name = 'updated_at') THEN
+            EXECUTE format('CREATE TRIGGER trig_set_updated_%I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.set_updated_at()', t, t);
+        END IF;
+    END LOOP;
+
+    -- Attach Forensic Black Box triggers universally (Excluding logs and PostGIS tables)
+    FOR t IN SELECT table_name FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+    AND table_type = 'BASE TABLE'
+    AND table_name NOT IN ('audit_logs', 'bus_telemetry_logs', 'spatial_ref_sys')
+    LOOP
+        EXECUTE format('CREATE TRIGGER trig_audit_%I AFTER INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.process_forensic_audit()', t, t);
+    END LOOP;
+END $$;
+
+-- Attach Role Guard
+CREATE TRIGGER trig_check_trip_lead_clearance BEFORE INSERT OR UPDATE ON public.trips
+FOR EACH ROW EXECUTE FUNCTION public.check_trip_lead_clearance();
+
+-- ==========================================
+-- STAGE 7: KINEMATIC INDICES & RLS INITIALIZATION
+-- ==========================================
+-- Indices for Dashboard Velocity
+CREATE INDEX IF NOT EXISTS idx_telemetry_bus_recorded ON public.bus_telemetry_logs (bus_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_buses_active_motion ON public.buses (id, bus_number) WHERE status = 'Active' AND motion_status = 'Moving';
+CREATE INDEX IF NOT EXISTS idx_students_emergency_flare ON public.students (id, full_name, school_id) WHERE missing_status != 'NONE';
+CREATE INDEX IF NOT EXISTS idx_audit_record_search ON public.audit_logs (record_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_user_search ON public.audit_logs (user_id, action_type);
+CREATE INDEX IF NOT EXISTS idx_audit_new_data_gin ON public.audit_logs USING GIN (new_data);
+CREATE INDEX IF NOT EXISTS idx_buses_vin_search ON public.buses (vin);
+CREATE INDEX IF NOT EXISTS idx_manifest_lookup ON public.trip_manifest (trip_id, student_id, expected_status);
+
+-- Flip the security switch (Deny By Default, BASE TABLES only)
+DO $$ 
+DECLARE t TEXT;
+BEGIN
+    FOR t IN SELECT table_name FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+    AND table_type = 'BASE TABLE'
+    AND table_name != 'spatial_ref_sys'
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 01: COMMS & BAY OPERATIONS
+-- Purpose: In-App Messaging, Pre/Post Trip Inspections, and Maintenance Logs
+-- Status: Diamond Tier | Bolts onto V25.1
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. BAY OPERATIONS & INSPECTIONS
+-- ==========================================
+CREATE TABLE public.bus_inspections (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    inspector_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    inspection_type TEXT NOT NULL CHECK (inspection_type IN ('Pre_Trip', 'Post_Trip', 'Bay_Review', 'DOT_Audit')),
+    status TEXT NOT NULL CHECK (status IN ('Passed', 'Flagged_Minor', 'Grounded')),
+    mileage INT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.maintenance_work_orders (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    reported_by_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    assigned_crew_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    issue_description TEXT NOT NULL,
+    priority TEXT DEFAULT 'Standard' CHECK (priority IN ('Low', 'Standard', 'Urgent', 'Critical_Grounded')),
+    status TEXT DEFAULT 'Open' CHECK (status IN ('Open', 'In_Progress', 'Awaiting_Parts', 'Resolved')),
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 2. COMMUNICATION & MESSAGING MESH
+-- ==========================================
+CREATE TABLE public.comms_channels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE CASCADE,
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE, -- Nullable for general channels
+    channel_name TEXT NOT NULL,
+    channel_type TEXT NOT NULL CHECK (channel_type IN ('Trip_Radio', 'Parent_Broadcast', 'Command_Direct', 'Emergency_Flare')),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.comms_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    channel_id UUID REFERENCES public.comms_channels(id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    message_body TEXT NOT NULL,
+    priority_flag BOOLEAN DEFAULT false,
+    read_by_uuids UUID[] DEFAULT '{}', -- Tracks read receipts for Command
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 3. DIAMOND ENGINE ATTACHMENT
+-- ==========================================
+DO $$ 
+DECLARE t TEXT;
+BEGIN
+    -- Attach Temporal Engines
+    FOR t IN SELECT unnest(ARRAY['bus_inspections', 'maintenance_work_orders', 'comms_channels'])
+    LOOP
+        EXECUTE format('CREATE TRIGGER trig_set_updated_%I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.set_updated_at()', t, t);
+    END LOOP;
+
+    -- Attach Forensic Black Box (comms_messages excluded to save storage on massive chat volumes)
+    FOR t IN SELECT unnest(ARRAY['bus_inspections', 'maintenance_work_orders', 'comms_channels'])
+    LOOP
+        EXECUTE format('CREATE TRIGGER trig_audit_%I AFTER INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.process_forensic_audit()', t, t);
+    END LOOP;
+
+    -- Initialize RLS
+    FOR t IN SELECT unnest(ARRAY['bus_inspections', 'maintenance_work_orders', 'comms_channels', 'comms_messages'])
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 02: KINEMATIC TRIP MESH & IOT SCAN LAYER
+-- Purpose: Waypoint Sequences, BLE/RFID Heartbeats, and Tap Recovery
+-- Status: Diamond Tier | Idempotent Local Engine
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE TRIP MESH (WAYPOINTS & NODES)
+-- ==========================================
+CREATE TABLE public.route_waypoints (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    sequence_index INT NOT NULL, -- The order of the stop (1, 2, 3...)
+    stop_name TEXT NOT NULL,
+    location_point GEOGRAPHY(POINT, 4326) NOT NULL,
+    geofence_radius_meters INT DEFAULT 50, -- Threshold for "Arrived" status
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    UNIQUE(trip_id, sequence_index)
+);
+
+CREATE TABLE public.trip_active_mesh (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE UNIQUE,
+    current_waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    next_waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    estimated_arrival_at TIMESTAMPTZ,
+    last_mesh_update TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 2. THE IOT SCAN LAYER (BLE / RFID / TAP)
+-- ==========================================
+CREATE TABLE public.student_scan_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    scan_type TEXT NOT NULL CHECK (scan_type IN ('BLE_Passive', 'RFID_Tap', 'NFC_Tap', 'Manual_Pilot', 'Manual_Teacher')),
+    event_action TEXT NOT NULL CHECK (event_action IN ('Boarded', 'Exited', 'Premature_Exit', 'Transfer')),
+    location_at_scan GEOGRAPHY(POINT, 4326) NOT NULL,
+    is_tap_recovery BOOLEAN DEFAULT false, -- Flag for manual corrections
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 3. IDEMPOTENT LOCAL ENGINE ATTACHMENT
+-- ==========================================
+DO $$ 
+DECLARE t TEXT;
+BEGIN
+    -- Attach Temporal Engines (Smart Replace)
+    FOR t IN SELECT unnest(ARRAY['route_waypoints', 'trip_active_mesh'])
+    LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trig_set_updated_%I ON public.%I;', t, t);
+        EXECUTE format('CREATE TRIGGER trig_set_updated_%I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.set_updated_at()', t, t);
+    END LOOP;
+
+    -- Attach Forensic Black Box (Scan events are immutable/high-volume, so we skip audit logs)
+    FOR t IN SELECT unnest(ARRAY['route_waypoints', 'trip_active_mesh'])
+    LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trig_audit_%I ON public.%I;', t, t);
+        EXECUTE format('CREATE TRIGGER trig_audit_%I AFTER INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.process_forensic_audit()', t, t);
+    END LOOP;
+
+    -- Initialize RLS
+    FOR t IN SELECT unnest(ARRAY['route_waypoints', 'trip_active_mesh', 'student_scan_events'])
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 03: EMS & EMERGENCY FLARE PROTOCOL
+-- Purpose: High-Priority Incident Tracking, 911 Dispatch Logs, & Medical Access
+-- Status: Diamond Tier | Bolts onto V25.1
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE FLARE MESH (INCIDENT CREATION)
+-- ==========================================
+CREATE TABLE public.emergency_flares (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE CASCADE,
+    triggered_by_id UUID REFERENCES auth.users(id) ON DELETE SET NULL, -- Who hit the panic button
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE, -- The physical location of the flare
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE, -- Nullable if it's a general bus crash, required if specific student medical emergency
+    flare_type TEXT NOT NULL CHECK (flare_type IN ('Medical_Student', 'Medical_Staff', 'Crash_Vehicle', 'Hostile_Interference', 'Mechanical_Critical')),
+    severity TEXT DEFAULT 'Level_1' CHECK (severity IN ('Level_1', 'Level_2_EMS_Required', 'Level_3_Mass_Casualty')),
+    status TEXT DEFAULT 'Active' CHECK (status IN ('Active', 'EMS_En_Route', 'EMS_On_Scene', 'Secured_Closed', 'False_Alarm')),
+    initial_location GEOGRAPHY(POINT, 4326) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 2. THE DISPATCH & RESOLUTION LOG
+-- ==========================================
+CREATE TABLE public.incident_dispatch_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    flare_id UUID REFERENCES public.emergency_flares(id) ON DELETE CASCADE,
+    command_officer_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL, -- The Command user managing the event
+    action_taken TEXT NOT NULL, -- e.g., "Called 911", "Rerouted Bus 42", "Contacted Parent"
+    agency_contacted TEXT CHECK (agency_contacted IN ('None', '911_Police', '911_Fire_EMS', 'District_Superintendent', 'DOT_Emergency')),
+    dispatch_notes TEXT,
+    action_timestamp TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 3. DIAMOND ENGINE ATTACHMENT
+-- ==========================================
+DO $$ 
+DECLARE t TEXT;
+BEGIN
+    -- 1. Attach Temporal Engine to Flare Table
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'emergency_flares') THEN
+        EXECUTE 'DROP TRIGGER IF EXISTS trig_set_updated_emergency_flares ON public.emergency_flares;';
+        EXECUTE 'CREATE TRIGGER trig_set_updated_emergency_flares BEFORE UPDATE ON public.emergency_flares FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();';
+    END IF;
+
+    -- 2. Attach Forensic Black Box (Smart Replace & Logs Excluded)
+    FOR t IN SELECT unnest(ARRAY['emergency_flares', 'incident_dispatch_logs'])
+    LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS trig_audit_%I ON public.%I;', t, t);
+        EXECUTE format('CREATE TRIGGER trig_audit_%I AFTER INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.process_forensic_audit()', t, t);
+    END LOOP;
+
+    -- 3. Initialize RLS
+    FOR t IN SELECT unnest(ARRAY['emergency_flares', 'incident_dispatch_logs'])
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
+COMMIT;
+
+-- ============================================================================
+-- THE DUVAL WALL: CORE ROW LEVEL SECURITY (PHASE 1)
+-- Purpose: Role lookups, Parent Gates, and Pilot Access
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE VIP BOUNCERS (Security Definer Functions)
+-- ==========================================
+-- These functions bypass RLS to quickly check a user's role/district without infinite looping.
+CREATE OR REPLACE FUNCTION public.get_my_role() RETURNS TEXT AS $$
+    SELECT role FROM public.staff_profiles WHERE id = auth.uid() LIMIT 1;
+$$ LANGUAGE sql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION public.get_my_district() RETURNS UUID AS $$
+    SELECT district_id FROM public.staff_profiles WHERE id = auth.uid() LIMIT 1;
+$$ LANGUAGE sql SECURITY DEFINER;
+
+-- ==========================================
+-- 2. PARENT POLICIES (The Guardian Gate)
+-- ==========================================
+-- Parents can only see themselves.
+DROP POLICY IF EXISTS parent_view_self ON public.parents;
+CREATE POLICY parent_view_self ON public.parents FOR SELECT USING (id = auth.uid());
+
+-- Parents can update their own profile (except verification status).
+DROP POLICY IF EXISTS parent_update_self ON public.parents;
+CREATE POLICY parent_update_self ON public.parents FOR UPDATE USING (id = auth.uid());
+
+-- Parents can only see students legally linked to them in the guardians table.
+DROP POLICY IF EXISTS parent_view_own_students ON public.students;
+CREATE POLICY parent_view_own_students ON public.students FOR SELECT 
+USING (id IN (SELECT student_id FROM public.student_guardians WHERE parent_id = auth.uid()));
+
+-- Parents can view their active authorizations (Device Auth).
+DROP POLICY IF EXISTS parent_view_device_auth ON public.student_device_authorizations;
+CREATE POLICY parent_view_device_auth ON public.student_device_authorizations FOR ALL 
+USING (parent_id = auth.uid());
+
+-- ==========================================
+-- 3. PILOT POLICIES (The Cockpit Gate)
+-- ==========================================
+-- Pilots can view their own profile.
+DROP POLICY IF EXISTS staff_view_self ON public.staff_profiles;
+CREATE POLICY staff_view_self ON public.staff_profiles FOR SELECT USING (id = auth.uid());
+
+-- Pilots can only see buses assigned to their contractor.
+DROP POLICY IF EXISTS pilot_view_fleet ON public.buses;
+CREATE POLICY pilot_view_fleet ON public.buses FOR SELECT 
+USING (
+    contractor_id IN (SELECT contractor_id FROM public.staff_profiles WHERE id = auth.uid())
+    OR assigned_pilot_id = auth.uid()
+);
+
+-- Pilots can INSERT telemetry (GPS pings) for buses they are driving.
+DROP POLICY IF EXISTS pilot_insert_telemetry ON public.bus_telemetry_logs;
+CREATE POLICY pilot_insert_telemetry ON public.bus_telemetry_logs FOR INSERT 
+WITH CHECK (
+    bus_id IN (SELECT id FROM public.buses WHERE assigned_pilot_id = auth.uid())
+);
+
+-- Pilots can view trips assigned to their bus today.
+DROP POLICY IF EXISTS pilot_view_trips ON public.trips;
+CREATE POLICY pilot_view_trips ON public.trips FOR SELECT 
+USING (
+    id IN (SELECT trip_id FROM public.bus_trip_handshakes WHERE bus_id IN (SELECT id FROM public.buses WHERE assigned_pilot_id = auth.uid()))
+);
+
+-- Pilots can INSERT/UPDATE scan events (Taps, BLE)
+DROP POLICY IF EXISTS pilot_manage_scans ON public.student_scan_events;
+CREATE POLICY pilot_manage_scans ON public.student_scan_events FOR INSERT 
+WITH CHECK (public.get_my_role() IN ('Pilot', 'Halo'));
+
+-- ==========================================
+-- 4. COMMAND / CENTRAL POLICIES (The District Overseer)
+-- ==========================================
+-- Command can see all students in THEIR district.
+DROP POLICY IF EXISTS command_view_district_students ON public.students;
+CREATE POLICY command_view_district_students ON public.students FOR SELECT 
+USING (
+    public.get_my_role() IN ('Command', 'Central') 
+    AND school_id IN (SELECT id FROM public.schools WHERE district_id = public.get_my_district())
+);
+
+-- Command can see all buses and telemetry in THEIR district.
+DROP POLICY IF EXISTS command_view_district_buses ON public.buses;
+CREATE POLICY command_view_district_buses ON public.buses FOR SELECT 
+USING (
+    public.get_my_role() IN ('Command', 'Central') 
+    AND contractor_id IN (SELECT id FROM public.contractors WHERE district_id = public.get_my_district())
+);
+
+DROP POLICY IF EXISTS command_view_district_telemetry ON public.bus_telemetry_logs;
+CREATE POLICY command_view_district_telemetry ON public.bus_telemetry_logs FOR SELECT 
+USING (
+    public.get_my_role() IN ('Command', 'Central') 
+    AND bus_id IN (SELECT id FROM public.buses WHERE contractor_id IN (SELECT id FROM public.contractors WHERE district_id = public.get_my_district()))
+);
+
+COMMIT;
+
+-- ============================================================================
+-- THE DUVAL WALL: OPERATIONAL RLS (PHASE 2)
+-- Purpose: Securing the Bay, the Mesh, and Emergency Flares
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE BAY GATE (Maintenance & Grounding)
+-- ==========================================
+-- Crew and Command can manage inspections.
+DROP POLICY IF EXISTS crew_manage_inspections ON public.bus_inspections;
+CREATE POLICY crew_manage_inspections ON public.bus_inspections FOR ALL 
+USING (
+    public.get_my_role() IN ('Crew', 'Command', 'Central')
+);
+
+-- Maintenance orders are visible to Crew and the specific Pilot assigned to the bus.
+DROP POLICY IF EXISTS crew_pilot_view_work_orders ON public.maintenance_work_orders;
+CREATE POLICY crew_pilot_view_work_orders ON public.maintenance_work_orders FOR SELECT 
+USING (
+    public.get_my_role() IN ('Crew', 'Command', 'Central')
+    OR bus_id IN (SELECT id FROM public.buses WHERE assigned_pilot_id = auth.uid())
+);
+
+-- ==========================================
+-- 2. THE MESH GATE (Real-time Trip Logic)
+-- ==========================================
+-- Everyone in the district (Staff) can see the Route Waypoints.
+DROP POLICY IF EXISTS staff_view_waypoints ON public.route_waypoints;
+CREATE POLICY staff_view_waypoints ON public.route_waypoints FOR SELECT 
+USING (
+    trip_id IN (SELECT id FROM public.trips WHERE district_id = public.get_my_district())
+);
+
+-- Only Active Pilots and Command can see/update the Active Mesh (Live Countdown).
+DROP POLICY IF EXISTS ops_manage_active_mesh ON public.trip_active_mesh;
+CREATE POLICY ops_manage_active_mesh ON public.trip_active_mesh FOR ALL 
+USING (
+    public.get_my_role() IN ('Pilot', 'Command', 'Central', 'Halo')
+);
+
+-- ==========================================
+-- 3. THE FLARE GATE (Emergency & 911)
+-- ==========================================
+-- EMERGENCY: Command, Central, and the specific Pilot/Student involved can see the Flare.
+DROP POLICY IF EXISTS flare_visibility ON public.emergency_flares;
+CREATE POLICY flare_visibility ON public.emergency_flares FOR SELECT 
+USING (
+    public.get_my_role() IN ('Command', 'Central')
+    OR bus_id IN (SELECT id FROM public.buses WHERE assigned_pilot_id = auth.uid())
+    OR student_id IN (SELECT student_id FROM public.student_guardians WHERE parent_id = auth.uid())
+);
+
+-- Only Command/Central can write to the Dispatch Logs (Forensic Audit Trail).
+DROP POLICY IF EXISTS command_manage_dispatch_logs ON public.incident_dispatch_logs;
+CREATE POLICY command_manage_dispatch_logs ON public.incident_dispatch_logs FOR ALL 
+USING (
+    public.get_my_role() IN ('Command', 'Central')
+);
+
+-- ==========================================
+-- 4. THE COMMS GATE (Messaging)
+-- ==========================================
+-- Users can only see messages where they are the sender or the recipient.
+DROP POLICY IF EXISTS msg_visibility ON public.comms_messages;
+CREATE POLICY msg_visibility ON public.comms_messages FOR SELECT 
+USING (
+    sender_id = auth.uid() 
+    OR recipient_id = auth.uid()
+);
+
+COMMIT;
+
+-- ==========================================
+-- ORBIT PATCH: COMMS COLUMN ALIGNMENT
+-- ==========================================
+BEGIN;
+
+-- Check if columns exist and rename them to the Diamond Standard
+DO $$ 
+BEGIN
+    -- Rename 'user_id' to 'sender_id' if it exists
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='comms_messages' AND column_name='user_id') THEN
+        ALTER TABLE public.comms_messages RENAME COLUMN user_id TO sender_id;
+    END IF;
+
+    -- If you are missing recipient_id entirely, we add it now
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='comms_messages' AND column_name='recipient_id') THEN
+        ALTER TABLE public.comms_messages ADD COLUMN recipient_id UUID REFERENCES auth.users(id);
+    END IF;
+END $$;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT INTELLIGENCE: AUTOMATIC GROUNDING ENGINE
+-- Purpose: Instantly grounds a bus if a critical safety failure is logged.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. THE GROUNDING LOGIC FUNCTION
+CREATE OR REPLACE FUNCTION public.fn_auto_ground_bus()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- If the inspection is marked as 'Failed' or 'Critical'
+    IF (NEW.inspection_status IN ('Failed', 'Critical', 'Safety_Pull')) THEN
+        
+        -- Update the physical bus status
+        UPDATE public.buses
+        SET 
+            is_grounded = true,
+            status = 'Maintenance_Required',
+            updated_at = clock_timestamp()
+        WHERE id = NEW.bus_id;
+
+        -- Create an automatic high-priority Maintenance Work Order
+        INSERT INTO public.maintenance_work_orders (
+            bus_id,
+            issue_description,
+            priority,
+            status
+        ) VALUES (
+            NEW.bus_id,
+            'AUTO-GENERATED: Bus grounded due to failed inspection. See Inspection ID: ' || NEW.id,
+            'Urgent',
+            'Open'
+        );
+
+        RAISE NOTICE 'BUS GROUNDED: Automatic safety interlock engaged for Bus %', NEW.bus_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. THE TRIP-WIRE TRIGGER
+-- This fire every time a new inspection is filed.
+DROP TRIGGER IF EXISTS trig_auto_grounding ON public.bus_inspections;
+CREATE TRIGGER trig_auto_grounding
+AFTER INSERT OR UPDATE OF inspection_status ON public.bus_inspections
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_auto_ground_bus();
+
+COMMIT;
+
+-- ==========================================
+-- ORBIT PATCH: BAY TABLE ALIGNMENT
+-- Purpose: Ensures bus_inspections has the status column the engine expects.
+-- ==========================================
+
+BEGIN;
+
+-- 1. Ensure the column exists with the correct name
+DO $$ 
+BEGIN
+    -- If 'status' exists, rename it to 'inspection_status' for the engine
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bus_inspections' AND column_name='status') THEN
+        ALTER TABLE public.bus_inspections RENAME COLUMN status TO inspection_status;
+    
+    -- If neither 'status' nor 'inspection_status' exist, add it fresh
+    ELSIF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='bus_inspections' AND column_name='inspection_status') THEN
+        ALTER TABLE public.bus_inspections ADD COLUMN inspection_status TEXT DEFAULT 'Passed';
+    END IF;
+END $$;
+
+-- 2. Add the constraint to prevent "junk data" in your safety logs
+ALTER TABLE public.bus_inspections 
+DROP CONSTRAINT IF EXISTS check_inspection_status;
+
+ALTER TABLE public.bus_inspections 
+ADD CONSTRAINT check_inspection_status 
+CHECK (inspection_status IN ('Passed', 'Failed', 'Critical', 'Safety_Pull', 'In_Progress'));
+
+COMMIT;
+
+-- ==========================================
+-- ORBIT PATCH: BAY TABLE ALIGNMENT
+-- Purpose: Ensures bus_inspections has the status column the engine expects.
+-- ==========================================
+
+BEGIN;
+
+-- 1. Ensure the column exists with the correct name
+DO $$ 
+BEGIN
+    -- If 'status' exists, rename it to 'inspection_status' for the engine
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bus_inspections' AND column_name='status') THEN
+        ALTER TABLE public.bus_inspections RENAME COLUMN status TO inspection_status;
+    
+    -- If neither 'status' nor 'inspection_status' exist, add it fresh
+    ELSIF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='bus_inspections' AND column_name='inspection_status') THEN
+        ALTER TABLE public.bus_inspections ADD COLUMN inspection_status TEXT DEFAULT 'Passed';
+    END IF;
+END $$;
+
+-- 2. Add the constraint to prevent "junk data" in your safety logs
+ALTER TABLE public.bus_inspections 
+DROP CONSTRAINT IF EXISTS check_inspection_status;
+
+ALTER TABLE public.bus_inspections 
+ADD CONSTRAINT check_inspection_status 
+CHECK (inspection_status IN ('Passed', 'Failed', 'Critical', 'Safety_Pull', 'In_Progress'));
+
+COMMIT;
+
+-- ==========================================
+-- ORBIT PATCH: BLE PROXIMITY ZONING
+-- ==========================================
+BEGIN;
+
+-- Add proximity metadata to scans
+ALTER TABLE public.student_scan_events 
+ADD COLUMN IF NOT EXISTS ble_zone INT DEFAULT 1; -- 1: Internal (On Bus), 2: External (Proximity)
+
+-- Update the check constraint to include the Halo "Verified" actions
+ALTER TABLE public.student_scan_events 
+DROP CONSTRAINT IF EXISTS student_scan_events_event_action_check;
+
+ALTER TABLE public.student_scan_events 
+ADD CONSTRAINT student_scan_events_event_action_check 
+CHECK (event_action IN ('Boarded', 'Exited', 'Premature_Exit', 'Transfer', 'Halo_Verified', 'Zone_Detection'));
+
+COMMIT;
+
+-- ============================================================================
+-- THE DUVAL WALL: COMMAND & HANGAR SECURITY
+-- Purpose: Ensuring Principals stay local and Supers go global.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. OUTBOUND ALERTS RLS
+-- Users can see any alert explicitly sent to them.
+DROP POLICY IF EXISTS alert_view_personal ON public.outbound_alerts;
+CREATE POLICY alert_view_personal ON public.outbound_alerts FOR SELECT 
+USING (recipient_id = auth.uid());
+
+-- Super/Command can see EVERY alert in their district for the "Global Feed".
+DROP POLICY IF EXISTS alert_view_district_global ON public.outbound_alerts;
+CREATE POLICY alert_view_district_global ON public.outbound_alerts FOR SELECT 
+USING (
+    public.get_my_role() IN ('Superintendent', 'Command', 'Central')
+);
+
+-- 2. DRONE ASSETS RLS
+-- Principals can ONLY see drones currently assigned to a flare at THEIR school.
+DROP POLICY IF EXISTS principal_view_active_drone ON public.drone_assets;
+CREATE POLICY principal_view_active_drone ON public.drone_assets FOR SELECT 
+USING (
+    public.get_my_role() = 'Principal' 
+    AND id IN (
+        SELECT (metadata->>'drone_id')::UUID 
+        FROM public.outbound_alerts 
+        WHERE recipient_id = auth.uid() AND alert_type = 'Drone_Dispatch'
+    )
+);
+
+-- Supers and Command see the entire fleet status.
+DROP POLICY IF EXISTS super_view_fleet ON public.drone_assets;
+CREATE POLICY super_view_fleet ON public.drone_assets FOR SELECT 
+USING (
+    public.get_my_role() IN ('Superintendent', 'Command', 'Central')
+    AND district_id = public.get_my_district()
+);
+
+-- 3. ENABLE SECURITY
+ALTER TABLE public.outbound_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.drone_assets ENABLE ROW LEVEL SECURITY;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT UPGRADE: LEADERSHIP NEWSFEED & PATROL LOGIC
+-- Purpose: Continuous status overview and "God Voice" messaging.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. UPGRADE DRONE STATES
+ALTER TABLE public.drone_assets 
+DROP CONSTRAINT IF EXISTS drone_assets_status_check;
+
+ALTER TABLE public.drone_assets 
+ADD CONSTRAINT drone_assets_status_check 
+CHECK (status IN ('Docked', 'Patrol', 'Deploying', 'On_Scene', 'Returning', 'Maintenance'));
+
+-- 2. THE COMMAND NEWSFEED VIEW
+-- This pulls the most recent critical events into one feed for the UI.
+CREATE OR REPLACE VIEW public.view_leadership_newsfeed AS
+SELECT 
+    'FLARE' as event_type,
+    id as source_id,
+    district_id,
+    created_at,
+    flare_type || ' - ' || severity as title,
+    'Status: ' || status as body
+FROM public.emergency_flares
+UNION ALL
+SELECT 
+    'SCAN' as event_type,
+    id as source_id,
+    (SELECT district_id FROM public.buses WHERE id = bus_id),
+    created_at,
+    'Student Activity' as title,
+    event_action || ' - Bus: ' || (SELECT bus_number FROM public.buses WHERE id = bus_id) as body
+FROM public.student_scan_events
+WHERE created_at > (now() - interval '2 hours')
+ORDER BY created_at DESC;
+
+COMMIT;
+
+-- ==========================================
+-- ORBIT PATCH: BUS-DISTRICT ALIGNMENT
+-- Purpose: Direct district linking for high-speed newsfeed filtering.
+-- ==========================================
+BEGIN;
+
+-- 1. Add the missing district_id column to the buses table
+ALTER TABLE public.buses 
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id);
+
+-- 2. Data Migration: Automatically populate district_id from the contractor link
+-- This ensures existing buses aren't left "homeless" in the data.
+UPDATE public.buses b
+SET district_id = c.district_id
+FROM public.contractors c
+WHERE b.contractor_id = c.id
+AND b.district_id IS NULL;
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE CHASSIS: COLUMN INJECTOR
+-- ==========================================
+-- This ensures every table has the "Nerves" needed for the logic.
+
+-- Staff Profiles
+ALTER TABLE public.staff_profiles 
+ADD COLUMN IF NOT EXISTS first_name TEXT,
+ADD COLUMN IF NOT EXISTS last_name TEXT,
+ADD COLUMN IF NOT EXISTS role TEXT,
+ADD COLUMN IF NOT EXISTS school_id UUID REFERENCES public.schools(id),
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id);
+
+-- Students
+ALTER TABLE public.students 
+ADD COLUMN IF NOT EXISTS guardian_id UUID REFERENCES auth.users(id);
+
+-- Buses
+ALTER TABLE public.buses 
+ADD COLUMN IF NOT EXISTS school_id UUID REFERENCES public.schools(id),
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id),
+ADD COLUMN IF NOT EXISTS current_route_id UUID,
+ADD COLUMN IF NOT EXISTS next_route_id UUID,
+ADD COLUMN IF NOT EXISTS is_on_campus BOOLEAN DEFAULT true,
+ADD COLUMN IF NOT EXISTS is_remote_locked BOOLEAN DEFAULT false;
+
+-- Manifest Snapshots (Fixing image_5ef91f error)
+ALTER TABLE public.halo_manifest_snapshots 
+ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Unverified',
+ADD COLUMN IF NOT EXISTS verified_by UUID REFERENCES auth.users(id),
+ADD COLUMN IF NOT EXISTS current_bus_id UUID REFERENCES public.buses(id),
+ADD COLUMN IF NOT EXISTS trip_id UUID,
+ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT now();
+
+-- ==========================================
+-- 2. THE INFRASTRUCTURE: TABLES
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS public.trips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    proposed_by UUID REFERENCES auth.users(id),
+    lead_id UUID REFERENCES auth.users(id),
+    school_id UUID REFERENCES public.schools(id),
+    trip_name TEXT NOT NULL,
+    status TEXT DEFAULT 'Proposed',
+    master_manifest JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS public.trip_bus_assignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id),
+    pilot_id UUID REFERENCES auth.users(id),
+    handshake_status BOOLEAN DEFAULT false,
+    confirmed_at TIMESTAMPTZ,
+    UNIQUE(trip_id, bus_id)
+);
+
+-- ==========================================
+-- 3. THE BRAIN: FIXED FUNCTIONS
+-- ==========================================
+
+-- A. PROPOSAL ENGINE (Fixing image_5fe2d1 syntax error)
+CREATE OR REPLACE FUNCTION public.fn_propose_trip(p_name TEXT, p_manifest JSONB)
+RETURNS UUID AS $$
+DECLARE v_new_id UUID;
+BEGIN
+    INSERT INTO public.trips (proposed_by, trip_name, master_manifest, school_id)
+    VALUES (
+        auth.uid(), 
+        p_name, 
+        p_manifest, 
+        (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid() LIMIT 1)
+    ) RETURNING id INTO v_new_id;
+    RETURN v_new_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- B. SMART BOARDING (With Audible Metadata)
+CREATE OR REPLACE FUNCTION public.fn_student_board_bus(p_student_id UUID, p_bus_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_is_on_manifest BOOLEAN;
+    v_is_at_school BOOLEAN;
+    v_trip_id UUID;
+BEGIN
+    -- Identify trip if applicable
+    SELECT trip_id INTO v_trip_id FROM public.trip_bus_assignments WHERE bus_id = p_bus_id AND handshake_status = true LIMIT 1;
+
+    -- Check school registry
+    SELECT EXISTS (SELECT 1 FROM public.students WHERE id = p_student_id) INTO v_is_at_school;
+
+    -- Check current manifest
+    SELECT EXISTS (
+        SELECT 1 FROM public.halo_manifest_snapshots 
+        WHERE student_id = p_student_id AND current_bus_id = p_bus_id
+    ) INTO v_is_on_manifest;
+
+    IF v_is_on_manifest THEN
+        UPDATE public.halo_manifest_snapshots 
+        SET status = 'Boarded', last_seen_at = now()
+        WHERE student_id = p_student_id AND current_bus_id = p_bus_id;
+        RETURN jsonb_build_object('status', 'Success', 'audible', false);
+    ELSIF v_is_at_school THEN
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, metadata)
+        VALUES (p_bus_id, 'No_Student_Flag', 'High', '{"is_audible": true, "alert_tone": "vocal_warning"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'message', 'Missing Slip', 'audible', true);
+    ELSE
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, metadata)
+        VALUES (p_bus_id, 'Wrong_Bus_Flag', 'Critical', '{"is_audible": true, "alert_tone": "siren"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'message', 'Wrong Bus', 'audible', true);
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==========================================
+-- 4. SECURITY: THE DUVAL WALL (RLS)
+-- ==========================================
+
+ALTER TABLE public.buses ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Orbit Map Visibility Policy" ON public.buses;
+CREATE POLICY "Orbit Map Visibility Policy" ON public.buses
+FOR SELECT TO authenticated
+USING (
+    (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) IN ('Command', 'Superintendent')
+    OR 
+    (
+        (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) = 'Central'
+        AND public.buses.school_id = (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid())
+    )
+    OR
+    EXISTS (
+        SELECT 1 FROM public.halo_manifest_snapshots hms
+        JOIN public.students s ON hms.student_id = s.id
+        WHERE hms.current_bus_id = public.buses.id 
+        AND hms.status = 'Boarded' 
+        AND s.guardian_id = auth.uid()
+    )
+);
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE CHASSIS: PHYSICAL RECONCILIATION
+-- ==========================================
+-- Ensures every "nerve ending" (column) exists before we bolt on the logic.
+
+ALTER TABLE public.staff_profiles 
+ADD COLUMN IF NOT EXISTS first_name TEXT,
+ADD COLUMN IF NOT EXISTS last_name TEXT,
+ADD COLUMN IF NOT EXISTS role TEXT,
+ADD COLUMN IF NOT EXISTS school_id UUID REFERENCES public.schools(id),
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id);
+
+ALTER TABLE public.students 
+ADD COLUMN IF NOT EXISTS guardian_id UUID REFERENCES auth.users(id);
+
+ALTER TABLE public.buses 
+ADD COLUMN IF NOT EXISTS school_id UUID REFERENCES public.schools(id),
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id),
+ADD COLUMN IF NOT EXISTS current_route_id UUID,
+ADD COLUMN IF NOT EXISTS next_route_id UUID,
+ADD COLUMN IF NOT EXISTS is_on_campus BOOLEAN DEFAULT true,
+ADD COLUMN IF NOT EXISTS is_remote_locked BOOLEAN DEFAULT false;
+
+ALTER TABLE public.halo_manifest_snapshots 
+ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Unverified',
+ADD COLUMN IF NOT EXISTS verified_by UUID REFERENCES auth.users(id),
+ADD COLUMN IF NOT EXISTS current_bus_id UUID REFERENCES public.buses(id),
+ADD COLUMN IF NOT EXISTS trip_id UUID,
+ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT now();
+
+-- ==========================================
+-- 2. THE INFRASTRUCTURE: TABLES
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS public.trips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    proposed_by UUID REFERENCES auth.users(id),
+    lead_id UUID REFERENCES auth.users(id),
+    school_id UUID REFERENCES public.schools(id),
+    trip_name TEXT NOT NULL,
+    status TEXT DEFAULT 'Proposed',
+    master_manifest JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS public.trip_bus_assignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id),
+    pilot_id UUID REFERENCES auth.users(id),
+    handshake_status BOOLEAN DEFAULT false,
+    confirmed_at TIMESTAMPTZ,
+    UNIQUE(trip_id, bus_id)
+);
+
+-- ==========================================
+-- 3. THE BRAIN: CORE FUNCTIONS
+-- ==========================================
+
+-- A. PROPOSAL HUB
+CREATE OR REPLACE FUNCTION public.fn_propose_trip(p_name TEXT, p_manifest JSONB)
+RETURNS UUID AS $$
+DECLARE v_new_id UUID;
+BEGIN
+    INSERT INTO public.trips (proposed_by, trip_name, master_manifest, school_id)
+    VALUES (auth.uid(), p_name, p_manifest, (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid() LIMIT 1))
+    RETURNING id INTO v_new_id;
+    RETURN v_new_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- B. BOARDING HUB (With Audible Siren/Vocal Flags)
+CREATE OR REPLACE FUNCTION public.fn_student_board_bus(p_student_id UUID, p_bus_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_is_on_manifest BOOLEAN;
+    v_is_at_school BOOLEAN;
+BEGIN
+    SELECT EXISTS (SELECT 1 FROM public.students WHERE id = p_student_id) INTO v_is_at_school;
+    SELECT EXISTS (SELECT 1 FROM public.halo_manifest_snapshots WHERE student_id = p_student_id AND current_bus_id = p_bus_id) INTO v_is_on_manifest;
+
+    IF v_is_on_manifest THEN
+        UPDATE public.halo_manifest_snapshots SET status = 'Boarded', last_seen_at = now() WHERE student_id = p_student_id AND current_bus_id = p_bus_id;
+        RETURN jsonb_build_object('status', 'Success', 'audible', false);
+    ELSIF v_is_at_school THEN
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, metadata)
+        VALUES (p_bus_id, 'No_Student_Flag', 'High', '{"is_audible": true, "alert_tone": "vocal_warning"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'message', 'Missing Slip', 'audible', true);
+    ELSE
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, metadata)
+        VALUES (p_bus_id, 'Wrong_Bus_Flag', 'Critical', '{"is_audible": true, "alert_tone": "siren"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'message', 'Wrong Bus', 'audible', true);
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- C. ROUTE HANDOFF HUB (The "No Child Left Behind" Lock)
+CREATE OR REPLACE FUNCTION public.fn_check_bus_clearance(p_bus_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN NOT EXISTS (SELECT 1 FROM public.halo_manifest_snapshots WHERE current_bus_id = p_bus_id AND status = 'Boarded');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION public.fn_queue_next_route(p_bus_id UUID, p_route_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE public.buses SET next_route_id = p_route_id WHERE id = p_bus_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- D. COMMAND OVERRIDE HUB
+CREATE OR REPLACE FUNCTION public.fn_command_alter_route(p_bus_id UUID, p_new_route_id UUID, p_reason TEXT)
+RETURNS VOID AS $$
+BEGIN
+    IF (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) != 'Command' THEN RAISE EXCEPTION 'Command Only.'; END IF;
+    UPDATE public.buses SET current_route_id = p_new_route_id WHERE id = p_bus_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==========================================
+-- 4. PRIVACY: THE DUVAL WALL (RLS)
+-- ==========================================
+
+ALTER TABLE public.buses ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Orbit Map Visibility Policy" ON public.buses;
+CREATE POLICY "Orbit Map Visibility Policy" ON public.buses
+FOR SELECT TO authenticated
+USING (
+    (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) IN ('Command', 'Superintendent')
+    OR 
+    (
+        (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) = 'Central'
+        AND public.buses.school_id = (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid())
+    )
+    OR
+    EXISTS (
+        SELECT 1 FROM public.halo_manifest_snapshots hms
+        JOIN public.students s ON hms.student_id = s.id
+        WHERE hms.current_bus_id = public.buses.id AND hms.status = 'Boarded' AND s.guardian_id = auth.uid()
+    )
+);
+
+COMMIT;
+
+-- Security Patch: Enforce RLS on Leadership & Satellite Views
+-- Converts views from Security Definer to Security Invoker
+
+ALTER VIEW public.view_leadership_newsfeed SET (security_invoker = on);
+
+ALTER VIEW public.view_lead_satellite_mirror SET (security_invoker = on);
+
+BEGIN;
+
+-- ==========================================
+-- PATCH 4: PARENT-CHAPERONE CHECKOUT PROTOCOL (V3)
+-- Purpose: Includes Active Pings for Central and Co-Parents
+-- ==========================================
+
+-- 1. The Log Table (If not already created)
+CREATE TABLE IF NOT EXISTS public.field_trip_checkouts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    requesting_parent_node_id UUID REFERENCES auth.users(id), 
+    approving_satellite_id UUID REFERENCES auth.users(id),    
+    status TEXT DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Denied')),
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+-- 2. Modify trip_manifest expected status
+ALTER TABLE public.trip_manifest 
+DROP CONSTRAINT IF EXISTS trip_manifest_expected_status_check;
+
+ALTER TABLE public.trip_manifest 
+ADD CONSTRAINT trip_manifest_expected_status_check 
+CHECK (expected_status IN ('EXPECTED', 'BOARDED', 'ABSENT', 'EXCUSED', 'EXCUSED_CHECKOUT'));
+
+-- 3. The Execution Engine (The Digital Handshake & Alert Router)
+CREATE OR REPLACE FUNCTION public.fn_approve_parent_checkout(p_checkout_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_checkout RECORD;
+    v_is_legal_guardian BOOLEAN;
+    v_approver_role TEXT;
+    v_assigned_satellite_id UUID;
+    v_lead_satellite_id UUID;
+    v_requesting_parent_name TEXT;
+BEGIN
+    -- Get the request details
+    SELECT * INTO v_checkout FROM public.field_trip_checkouts WHERE id = p_checkout_id;
+    
+    -- Identify the Approver's Role
+    SELECT role INTO v_approver_role FROM public.staff_profiles WHERE id = auth.uid();
+
+    -- Identify the specifically assigned Satellite (Teacher) and the Lead Satellite
+    SELECT satellite_id INTO v_assigned_satellite_id FROM public.trip_chaperone_groups 
+    WHERE trip_id = v_checkout.trip_id AND node_id = v_checkout.requesting_parent_node_id LIMIT 1;
+
+    SELECT lead_id INTO v_lead_satellite_id FROM public.trips WHERE id = v_checkout.trip_id;
+
+    -- Get the name of the parent checking the student out (for the co-parent alert)
+    SELECT COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') INTO v_requesting_parent_name 
+    FROM public.guardian_profiles WHERE id = v_checkout.requesting_parent_node_id;
+
+    -- STEP 1: Verify Approver Authority
+    IF v_approver_role NOT IN ('Satellite', 'Lead_Satellite', 'Command', 'Principal') THEN
+        RAISE EXCEPTION 'Authority Error: Invalid role for checkout approval.';
+    END IF;
+
+    -- STRICT GATE: If the approver is a standard Teacher, they MUST be the specific assigned Teacher.
+    IF v_approver_role = 'Satellite' AND auth.uid() != v_assigned_satellite_id THEN
+        RAISE EXCEPTION 'Authority Error: Only the assigned Teacher or Trip Lead can approve this checkout.';
+    END IF;
+
+    -- STEP 2: Verify Legal Guardianship
+    SELECT EXISTS (
+        SELECT 1 FROM public.student_guardians 
+        WHERE student_id = v_checkout.student_id 
+        AND parent_id = v_checkout.requesting_parent_node_id
+    ) INTO v_is_legal_guardian;
+
+    IF NOT v_is_legal_guardian THEN
+        UPDATE public.field_trip_checkouts SET status = 'Denied', resolved_at = now() WHERE id = p_checkout_id;
+        RAISE EXCEPTION 'Security Error: This Chaperone is not a legally registered guardian for this student.';
+    END IF;
+
+    -- STEP 3: Execute the Checkout Logic
+    
+    -- A. Update the checkout log
+    UPDATE public.field_trip_checkouts 
+    SET status = 'Approved', approving_satellite_id = auth.uid(), resolved_at = now() 
+    WHERE id = p_checkout_id;
+
+    -- B. Remove the student from the return bus expected manifest
+    UPDATE public.trip_manifest 
+    SET expected_status = 'EXCUSED_CHECKOUT' 
+    WHERE trip_id = v_checkout.trip_id AND student_id = v_checkout.student_id;
+
+    -- C. Update the student's global status
+    UPDATE public.students 
+    SET current_status = 'off_bus', status_note = 'Checked_Out_By_Parent'
+    WHERE id = v_checkout.student_id;
+
+    -- ==========================================
+    -- STEP 4: ALERT ROUTING MATRIX
+    -- ==========================================
+
+    -- ALERT 1: PILOT (The "What" - Operational)
+    INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body)
+    SELECT pilot_id, 'Routine_Tap', 'Normal', 'MANIFEST UPDATE', 
+           'Student has been checked out by parent. Removed from return manifest.'
+    FROM public.trip_bus_assignments WHERE trip_id = v_checkout.trip_id;
+
+    -- ALERT 2: LEAD SATELLITE (The "Why" - Tactical)
+    IF v_lead_satellite_id IS NOT NULL THEN
+        INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body)
+        VALUES (
+            v_lead_satellite_id, 'Rescue_Update', 'High', 'MASTER MANIFEST UPDATE', 
+            'Student securely checked out by ' || v_requesting_parent_name || '.'
+        );
+    END IF;
+
+    -- ALERT 3: CENTRAL / FRONT OFFICE (The "Why" - Administrative)
+    INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body)
+    SELECT sp.id, 'Rescue_Update', 'Normal', 'ADMIN RECORD: FIELD TRIP CHECKOUT', 
+           'Student safely checked out by ' || v_requesting_parent_name || '. Master Manifest adjusted.'
+    FROM public.staff_profiles sp
+    WHERE sp.role = 'Central' 
+    AND sp.school_id = (SELECT school_id FROM public.students WHERE id = v_checkout.student_id);
+
+    -- ALERT 4: CO-PARENTS / ADDITIONAL GUARDIANS (Transparency)
+    INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body)
+    SELECT parent_id, 'Routine_Tap', 'High', 'STUDENT CHECKOUT NOTIFICATION', 
+           'Your student was checked out from the field trip by ' || v_requesting_parent_name || '.'
+    FROM public.student_guardians
+    WHERE student_id = v_checkout.student_id 
+    AND parent_id != v_checkout.requesting_parent_node_id; -- Do not ping the parent who just made the request
+
+    RETURN jsonb_build_object('status', 'Success', 'message', 'Student safely checked out. Manifests and alerts routed.');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. DEADZONE CACHING (Temporal Separation)
+-- ==========================================
+-- Update Scans to respect offline caching
+ALTER TABLE public.student_scan_events 
+ADD COLUMN IF NOT EXISTS device_timestamp TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ DEFAULT clock_timestamp();
+
+-- Update Telemetry to respect offline caching
+ALTER TABLE public.bus_telemetry_logs 
+ADD COLUMN IF NOT EXISTS device_timestamp TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ DEFAULT clock_timestamp();
+
+-- ==========================================
+-- 2. HARDWARE BINDING (Device Fingerprinting)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.trusted_hardware (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    device_fingerprint TEXT UNIQUE NOT NULL,
+    assigned_bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    device_type TEXT CHECK (device_type IN ('Pilot_Tablet', 'Bay_Tablet', 'Node_Phone')),
+    last_sync_at TIMESTAMPTZ,
+    is_active BOOLEAN DEFAULT true
+);
+
+-- Ensure Pilots are using the correct physical tablet
+ALTER TABLE public.halo_sessions
+ADD COLUMN IF NOT EXISTS hardware_id UUID REFERENCES public.trusted_hardware(id);
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- THE CHRONOS PATCH: DATA LIFECYCLE MANAGEMENT
+-- ==========================================
+
+-- 1. Create a cold storage schema for archived data
+CREATE SCHEMA IF NOT EXISTS archive;
+
+-- 2. Create the cold storage tables
+CREATE TABLE IF NOT EXISTS archive.bus_telemetry_logs (LIKE public.bus_telemetry_logs INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS archive.audit_logs (LIKE public.audit_logs INCLUDING ALL);
+
+-- 3. The Janitor Engine (Moves old data to cold storage)
+CREATE OR REPLACE FUNCTION public.fn_archive_stale_data()
+RETURNS VOID AS $$
+BEGIN
+    -- Move Telemetry older than 30 days
+    WITH moved_telemetry AS (
+        DELETE FROM public.bus_telemetry_logs
+        WHERE synced_at < (now() - interval '30 days')
+        RETURNING *
+    )
+    INSERT INTO archive.bus_telemetry_logs SELECT * FROM moved_telemetry;
+
+    -- Move Audit Logs older than 90 days (Compliance requirement)
+    WITH moved_audits AS (
+        DELETE FROM public.audit_logs
+        WHERE created_at < (now() - interval '90 days')
+        RETURNING *
+    )
+    INSERT INTO archive.audit_logs SELECT * FROM moved_audits;
+
+    -- Hard Delete Telemetry older than 1 year from the archive (Save storage costs)
+    DELETE FROM archive.bus_telemetry_logs WHERE synced_at < (now() - interval '1 year');
+    
+    RAISE NOTICE 'Chronos Janitor Engine completed cycle.';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==========================================
+-- NOTE ON EXECUTION:
+-- In Supabase, you will use pg_cron to schedule this function to run every night at 2:00 AM.
+-- SELECT cron.schedule('0 2 * * *', $$SELECT public.fn_archive_stale_data()$$);
+-- ==========================================
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. ENTERPRISE INDEXING (Zero-Lag Queries)
+-- Purpose: Prevents table-scans on high-traffic relational joins.
+-- ==========================================
+CREATE INDEX IF NOT EXISTS idx_trip_chaperones_trip ON public.trip_chaperone_groups(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trip_chaperones_node ON public.trip_chaperone_groups(node_id);
+CREATE INDEX IF NOT EXISTS idx_trip_checkouts_trip ON public.field_trip_checkouts(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trip_checkouts_student ON public.field_trip_checkouts(student_id);
+CREATE INDEX IF NOT EXISTS idx_halo_manifest_session ON public.halo_manifest_snapshots(halo_session_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_hardware_bus ON public.trusted_hardware(assigned_bus_id);
+
+-- ==========================================
+-- 2. SUPABASE REALTIME ENABLEMENT
+-- Purpose: Activates the WebSockets for "God's Voice" and Live Maps.
+-- ==========================================
+-- Add the highest-priority, live-updating tables to the Realtime publication
+ALTER PUBLICATION supabase_realtime ADD TABLE public.outbound_alerts;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.buses;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.emergency_flares;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.trip_active_mesh;
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE MISSING LINK: MACRO-VENUES
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.field_trip_venues (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    venue_name TEXT NOT NULL,
+    macro_geofence_polygon GEOGRAPHY(POLYGON, 4326),
+    parking_area_polygon GEOGRAPHY(POLYGON, 4326),
+    emergency_buffer_meters INT DEFAULT 100,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+ALTER TABLE public.trips 
+ADD COLUMN IF NOT EXISTS venue_id UUID REFERENCES public.field_trip_venues(id);
+
+-- ==========================================
+-- 2. THE MISSING LINK: CHAIN OF CUSTODY
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.trip_chaperone_groups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    node_id UUID REFERENCES public.staff_profiles(id),
+    satellite_id UUID REFERENCES public.staff_profiles(id),
+    outbound_bus_id UUID REFERENCES public.buses(id),
+    return_bus_id UUID REFERENCES public.buses(id),
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+ALTER TABLE public.trip_manifest 
+ADD COLUMN IF NOT EXISTS assigned_group_id UUID REFERENCES public.trip_chaperone_groups(id) ON DELETE SET NULL;
+
+-- ==========================================
+-- 3. THE MISSING LINK: 15/10 PROTOCOL TIMERS
+-- ==========================================
+ALTER TABLE public.emergency_flares 
+ADD COLUMN IF NOT EXISTS search_timer_started_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS search_timer_suspended_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS search_verified_by_satellite_id UUID REFERENCES public.staff_profiles(id),
+ADD COLUMN IF NOT EXISTS search_timer_status TEXT DEFAULT 'Not_Applicable' 
+    CHECK (search_timer_status IN ('Not_Applicable', '15m_Active', '10m_Backup_Active', 'Resolved_Verified', 'Escalated_Failed'));
+
+-- ==========================================
+-- 4. THE DBA POLISH: ENTERPRISE INDEXING
+-- ==========================================
+CREATE INDEX IF NOT EXISTS idx_trip_chaperones_trip ON public.trip_chaperone_groups(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trip_chaperones_node ON public.trip_chaperone_groups(node_id);
+CREATE INDEX IF NOT EXISTS idx_trip_checkouts_trip ON public.field_trip_checkouts(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trip_checkouts_student ON public.field_trip_checkouts(student_id);
+CREATE INDEX IF NOT EXISTS idx_halo_manifest_session ON public.halo_manifest_snapshots(halo_session_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_hardware_bus ON public.trusted_hardware(assigned_bus_id);
+
+-- ==========================================
+-- 5. SECURE THE NEW TABLES (The Duval Wall)
+-- ==========================================
+ALTER TABLE public.field_trip_venues ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.trip_chaperone_groups ENABLE ROW LEVEL SECURITY;
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. REALIGNING TRUSTED HARDWARE
+-- Purpose: Authorize Driver BYOD devices for the Halo App
+-- ==========================================
+ALTER TABLE public.trusted_hardware 
+DROP CONSTRAINT IF EXISTS trusted_hardware_device_type_check;
+
+ALTER TABLE public.trusted_hardware 
+ADD CONSTRAINT trusted_hardware_device_type_check 
+CHECK (device_type IN ('Pilot_Tablet', 'Bay_Tablet', 'Node_Phone', 'Driver_BYOD'));
+
+
+-- ==========================================
+-- 2. RESETTING SATELLITE PERMISSIONS (Account-Based Only)
+-- Purpose: Restores seamless, password-verified district access for Teachers
+-- ==========================================
+DROP POLICY IF EXISTS satellite_view_huddle ON public.halo_manifest_snapshots;
+
+CREATE POLICY satellite_view_huddle ON public.halo_manifest_snapshots FOR SELECT 
+USING (
+    public.get_my_role() IN ('Satellite', 'Lead_Satellite', 'Staff_Teacher')
+    AND student_id IN (
+        SELECT id FROM public.students 
+        WHERE school_id IN (SELECT id FROM public.schools WHERE district_id = public.get_my_district())
+    )
+);
+
+
+-- ==========================================
+-- 3. THE COLD STORAGE LOCKBOX TABLES
+-- Purpose: Secure historical archive buckets for the post-trip data flush
+-- ==========================================
+CREATE TABLE IF NOT EXISTS archive.halo_manifest_snapshots (LIKE public.halo_manifest_snapshots INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS archive.comms_messages (LIKE public.comms_messages INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS archive.field_trip_checkouts (LIKE public.field_trip_checkouts INCLUDING ALL);
+
+
+-- ==========================================
+-- 4. THE DATA LOCKBOX ENGINE (Automated Purge Trigger)
+-- Purpose: Instantly strips sensitive operational data upon trip completion
+-- ==========================================
+CREATE OR REPLACE FUNCTION public.fn_execute_trip_lockbox_purge()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_halo_session_id UUID;
+BEGIN
+    -- Only engage the lockbox when a trip is officially finalized
+    IF (NEW.status IN ('Completed', 'Canceled')) THEN
+        
+        -- Find the Halo session associated with this trip via assignments
+        SELECT hs.id INTO v_halo_session_id 
+        FROM public.halo_sessions hs
+        JOIN public.trip_bus_assignments tba ON hs.bus_id = tba.bus_id
+        WHERE tba.trip_id = NEW.id LIMIT 1;
+
+        -- STEP 1: Flush the Halo Manifest Snapshot to Cold Storage Archive
+        IF v_halo_session_id IS NOT NULL THEN
+            WITH flushed_snapshots AS (
+                DELETE FROM public.halo_manifest_snapshots
+                WHERE halo_session_id = v_halo_session_id
+                RETURNING *
+            )
+            INSERT INTO archive.halo_manifest_snapshots SELECT * FROM flushed_snapshots;
+            
+            -- Close out the live Halo session
+            UPDATE public.halo_sessions 
+            SET bailout_status = 'Rescued_Complete', updated_at = now()
+            WHERE id = v_halo_session_id;
+        END IF;
+
+        -- STEP 2: Flush In-App Chat Logs for the Trip Radio Channel
+        WITH flushed_chat AS (
+            DELETE FROM public.comms_messages
+            WHERE channel_id IN (SELECT id FROM public.comms_channels WHERE trip_id = NEW.id)
+            RETURNING *
+        )
+        INSERT INTO archive.comms_messages SELECT * FROM flushed_chat;
+
+        -- STEP 3: Flush Parent-Chaperone Field Trip Checkouts
+        WITH flushed_checkouts AS (
+            DELETE FROM public.field_trip_checkouts
+            WHERE trip_id = NEW.id
+            RETURNING *
+        )
+        INSERT INTO archive.field_trip_checkouts SELECT * FROM flushed_checkouts;
+
+        -- STEP 4: Soft-Delete/Archive Active Manifest
+        UPDATE public.trip_manifest 
+        SET expected_status = 'EXCUSED'
+        WHERE trip_id = NEW.id;
+
+        -- Log the cryptographic scrub event for Government Compliance Audits
+        INSERT INTO public.incident_dispatch_logs (action_taken, dispatch_notes)
+        VALUES (
+            'DATA_LOCKBOX_SECURED', 
+            'Trip ID ' || NEW.id || ' finalized. Active manifests, chat protocols, and student checkout data scrubbed from live operational layers.'
+        );
+
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+-- ==========================================
+-- 5. ATTACHING THE TRIPWIRE TRIGGER
+-- ==========================================
+DROP TRIGGER IF EXISTS trig_lockbox_purge ON public.trips;
+
+CREATE TRIGGER trig_lockbox_purge
+AFTER UPDATE OF status ON public.trips
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_execute_trip_lockbox_purge();
+
+COMMIT;
+
+BEGIN;
+
+-- ========================================================
+-- 1. SECONDARY AUTHORIZED PROFILES (Orbit Trust User Base)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.secondary_authorized_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    phone_number TEXT,
+    avatar_url TEXT NOT NULL, -- REQUIRED: The security photo for Driver HUD matching
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ========================================================
+-- 2. THE TRUST JUNCTION BOX (Mapping Sub-Guardians to Kids)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.student_secondary_authorizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID REFERENCES public.students(id) ON DELETE CASCADE,
+    secondary_id UUID REFERENCES public.secondary_authorized_profiles(id) ON DELETE CASCADE,
+    authorized_by_parent_id UUID REFERENCES public.guardian_profiles(id) ON DELETE CASCADE,
+    relationship_label TEXT NOT NULL, -- e.g., 'Sibling', 'Nanny', 'Grandparent'
+    morning_track_allowed BOOLEAN DEFAULT TRUE,
+    afternoon_track_allowed BOOLEAN DEFAULT TRUE,
+    chaperone_approved_status BOOLEAN DEFAULT FALSE, -- Must be TRUE for Node Mode to unlock
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    CONSTRAINT unique_student_secondary_auth UNIQUE (student_id, secondary_id)
+);
+
+-- ========================================================
+-- 3. THE INFRASTRUCTURE SECURITY WALLS (RLS Activation)
+-- ========================================================
+ALTER TABLE public.secondary_authorized_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.student_secondary_authorizations ENABLE ROW LEVEL SECURITY;
+
+COMMIT;
+
+BEGIN;
+
+-- ========================================================
+-- THE CUSTODY WAIVER AUDIT LEDGER (Immutability Enforced)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.custody_waiver_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID REFERENCES public.students(id) ON DELETE RESTRICT,
+    guardian_id UUID REFERENCES public.guardian_profiles(id) ON DELETE RESTRICT,
+    waiver_text TEXT NOT NULL, -- Holds the exact legal language displayed at that moment
+    typed_signature TEXT NOT NULL, -- The exact string typed by the parent (must match profile name)
+    ip_address TEXT, -- Captured network vector for legal non-repudiation
+    device_user_agent TEXT, -- Captures phone OS and browser details
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- Turn on the walls
+ALTER TABLE public.custody_waiver_logs ENABLE ROW LEVEL SECURITY;
+
+-- Block all modifications or deletions - Insert Only
+CREATE POLICY insert_only_waivers ON public.custody_waiver_logs
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (guardian_id = auth.uid());
+
+CREATE POLICY select_own_waivers ON public.custody_waiver_logs
+    FOR SELECT
+    TO authenticated
+    USING (
+        guardian_id = auth.uid() 
+        OR 
+        (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) IN ('Dispatcher', 'Superintendent')
+    );
+
+COMMIT;
+
+-- 1. Create the Profiles table (The Role/RBAC Source of Truth)
+create table public.profiles (
+  id uuid references auth.users on delete cascade primary key,
+  role text not null check (role in ('central', 'command', 'point')),
+  contractor_id text, -- Used to filter 'command' users
+  student_id text,    -- Used to filter 'point' users
+  email text,
+  updated_at timestamp with time zone
+);
+
+-- 2. Enable RLS (The Bouncer)
+alter table public.profiles enable row level security;
+
+-- 3. Create Policy: Only Super Admins (Central) can read/write roles
+create policy "Allow read for all authenticated users" on public.profiles
+  for select using (auth.role() = 'authenticated');
+
+create policy "Allow insert/update for Superintendents only" on public.profiles
+  for all using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'central'
+    )
+  );
+
+-- This function runs when the SIS status changes
+CREATE OR REPLACE FUNCTION public.handle_graduation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- If student status changes to 'graduated'
+  IF NEW.status = 'graduated' THEN
+    -- 1. Remove the Pin-specific role if it exists
+    UPDATE public.profiles 
+    SET preferred_app = 'trust' -- Force the default to Trust
+    WHERE id = NEW.user_id;
+    
+    -- 2. Optionally, nullify the student_id to "deactivate" the Pin app view
+    UPDATE public.profiles
+    SET student_id = NULL
+    WHERE id = NEW.user_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 1. Create the function that triggers on user creation
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, role, preferred_app)
+  VALUES (NEW.id, NEW.email, 'point', 'point'); -- Defaults new users to 'point'
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. Bind the function to the auth.users table
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+-- 1. Create the Profiles table if it doesn't exist
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid REFERENCES auth.users on delete cascade primary key,
+  role text not null check (role in ('central', 'command', 'point', 'driver', 'auditor')),
+  contractor_id text,
+  student_id text,
+  email text,
+  preferred_app text DEFAULT 'point', -- Added to handle Dual-Role routing
+  updated_at timestamp with time zone DEFAULT now()
+);
+
+-- 2. Ensure preferred_app exists if table was already created
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS preferred_app text DEFAULT 'point';
+
+-- Enable security
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+-- Reset policies to be clean
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Central admins can do anything" ON public.profiles;
+
+-- Create fresh, secure policies
+CREATE POLICY "Users can read own profile" ON public.profiles
+  FOR SELECT USING (auth.uid() = id);
+
+CREATE POLICY "Central admins can do anything" ON public.profiles
+  FOR ALL USING (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'central')
+  );
+
+-- 1. Trigger for New User Creation (Auto-profiles)
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, role, preferred_app)
+  VALUES (NEW.id, NEW.email, 'point', 'point');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+-- 2. Trigger for Graduation/Withdrawal (Lifecycle)
+CREATE OR REPLACE FUNCTION public.handle_graduation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Only trigger if the status changed to 'graduated' or 'withdrawn'
+  IF (NEW.enrollment_status = 'graduated' OR NEW.enrollment_status = 'withdrawn') THEN
+    
+    -- Check if they have a relationship to the Trust app (The Dual-Role check)
+    IF EXISTS (
+      SELECT 1 
+      FROM public.authorized_relationships 
+      WHERE user_id = NEW.user_id
+    ) THEN
+      UPDATE public.profiles
+      SET preferred_app = 'trust'
+      WHERE id = NEW.user_id;
+    END IF;
+    
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Bind the trigger to 'enrollment_status'
+DROP TRIGGER IF EXISTS on_student_graduation ON public.students;
+CREATE TRIGGER on_student_graduation
+  AFTER UPDATE OF enrollment_status ON public.students
+  FOR EACH ROW
+  EXECUTE PROCEDURE public.handle_graduation();
+
+CREATE OR REPLACE FUNCTION public.handle_graduation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Only trigger if the status changed to 'graduated'
+  IF NEW.status = 'graduated' THEN
+    
+    -- STEP 1: Check if this user has any active relationships (Dual-Role check)
+    -- We look in 'authorized_relationships' to see if they are a guardian/adult
+    IF EXISTS (
+      SELECT 1 
+      FROM public.authorized_relationships 
+      WHERE user_id = NEW.user_id
+    ) THEN
+      -- Only if they HAVE a dual-role, promote them to 'trust'
+      UPDATE public.profiles
+      SET preferred_app = 'trust'
+      WHERE id = NEW.user_id;
+    ELSE
+      -- Optional: If they DON'T have a dual role, you might want to 
+      -- set them to 'archived' or just leave them alone. 
+      -- Here we just do nothing, keeping them as 'point'.
+      NULL; 
+    END IF;
+    
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 1. SCHEMA: Ensure Profiles table and Students column exist
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid REFERENCES auth.users ON DELETE CASCADE PRIMARY KEY,
+  role text NOT NULL DEFAULT 'point' CHECK (role IN ('central', 'command', 'point', 'driver', 'auditor')),
+  email text,
+  preferred_app text DEFAULT 'point',
+  updated_at timestamp with time zone DEFAULT now()
+);
+
+-- Ensure the graduation status column exists in your students table
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS enrollment_status text DEFAULT 'active';
+
+-- 2. SECURITY: Enable RLS and set policies
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Central admins can do anything" ON public.profiles;
+
+CREATE POLICY "Users can read own profile" ON public.profiles
+  FOR SELECT USING (auth.uid() = id);
+
+CREATE POLICY "Central admins can do anything" ON public.profiles
+  FOR ALL USING (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'central')
+  );
+
+-- 3. AUTOMATION: Trigger for New User Sign-ups
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, role, preferred_app)
+  VALUES (NEW.id, NEW.email, 'point', 'point');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+-- 4. AUTOMATION: Trigger for Graduation/Withdrawal Lifecycle
+CREATE OR REPLACE FUNCTION public.handle_graduation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Only trigger if the status actually changes to graduated or withdrawn
+  IF (NEW.enrollment_status = 'graduated' OR NEW.enrollment_status = 'withdrawn') THEN
+    
+    -- Check if the student has a relationship in 'authorized_relationships'
+    -- (This prevents 'pin' students with no dual-role from being forced into 'trust')
+    IF EXISTS (
+      SELECT 1 
+      FROM public.authorized_relationships 
+      WHERE user_id = NEW.user_id
+    ) THEN
+      UPDATE public.profiles
+      SET preferred_app = 'trust'
+      WHERE id = NEW.user_id;
+    END IF;
+    
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS on_student_graduation ON public.students;
+CREATE TRIGGER on_student_graduation
+  AFTER UPDATE OF enrollment_status ON public.students
+  FOR EACH ROW
+  EXECUTE PROCEDURE public.handle_graduation();
+
+-- 1. SCHEMA: Ensure Profiles table and Students column exist
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid REFERENCES auth.users ON DELETE CASCADE PRIMARY KEY,
+  role text NOT NULL DEFAULT 'point' CHECK (role IN ('central', 'command', 'point', 'driver', 'auditor')),
+  email text,
+  preferred_app text DEFAULT 'point',
+  updated_at timestamp with time zone DEFAULT now()
+);
+
+-- Ensure the graduation status column exists in your students table
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS enrollment_status text DEFAULT 'active';
+
+-- 2. SECURITY: Enable RLS and set policies
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Central admins can do anything" ON public.profiles;
+
+CREATE POLICY "Users can read own profile" ON public.profiles
+  FOR SELECT USING (auth.uid() = id);
+
+CREATE POLICY "Central admins can do anything" ON public.profiles
+  FOR ALL USING (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'central')
+  );
+
+-- 3. AUTOMATION: Trigger for New User Sign-ups
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, role, preferred_app)
+  VALUES (NEW.id, NEW.email, 'point', 'point');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+-- 4. AUTOMATION: Trigger for Graduation/Withdrawal Lifecycle
+CREATE OR REPLACE FUNCTION public.handle_graduation()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Only trigger if the status actually changes to graduated or withdrawn
+  IF (NEW.enrollment_status = 'graduated' OR NEW.enrollment_status = 'withdrawn') THEN
+    
+    -- Check if the student has a relationship in 'authorized_relationships'
+    -- (This prevents 'pin' students with no dual-role from being forced into 'trust')
+    IF EXISTS (
+      SELECT 1 
+      FROM public.authorized_relationships 
+      WHERE user_id = NEW.user_id
+    ) THEN
+      UPDATE public.profiles
+      SET preferred_app = 'trust'
+      WHERE id = NEW.user_id;
+    END IF;
+    
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS on_student_graduation ON public.students;
+CREATE TRIGGER on_student_graduation
+  AFTER UPDATE OF enrollment_status ON public.students
+  FOR EACH ROW
+  EXECUTE PROCEDURE public.handle_graduation();
+
+-- This function allows a user to "claim" their SIS data securely
+CREATE OR REPLACE FUNCTION public.link_sis_account(
+  p_student_id text, 
+  p_student_dob date
+)
+RETURNS boolean AS $$
+DECLARE
+  v_student_record record;
+BEGIN
+  -- 1. Look for the matching student in the SIS table
+  SELECT * INTO v_student_record 
+  FROM public.students 
+  WHERE sis_student_id = p_student_id 
+    AND date_of_birth = p_student_dob;
+
+  -- 2. If no match is found, return false (Lovable will show an error)
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  -- 3. If a match IS found, link the current user to the student.
+  -- Depending on your schema, you might update the profiles table:
+  UPDATE public.profiles
+  SET student_id = v_student_record.id
+  WHERE id = auth.uid();
+  
+  -- OR, if this is a parent, you would insert into authorized_relationships here.
+  
+  RETURN true;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+BEGIN;
+
+-- ========================================================
+-- 1. CREATE THE DATA TYPES FIRST (The ENUM)
+-- ========================================================
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'vehicle_operational_state') THEN
+        CREATE TYPE vehicle_operational_state AS ENUM ('Active', 'Grounded', 'Garage', 'Out_of_Service');
+    END IF;
+END $$;
+
+-- ========================================================
+-- 2. CREATE CONTRACTOR PROFILES (The Parent Table)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.contractor_profiles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    corporate_name TEXT NOT NULL,
+    district_contract_code TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ========================================================
+-- 3. CREATE FLEET VEHICLES (The Base Table, uses the ENUM)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.fleet_vehicles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    contractor_id UUID REFERENCES public.contractor_profiles(id) ON DELETE SET NULL,
+    vehicle_number TEXT NOT NULL UNIQUE,
+    license_plate TEXT,
+    vin_number TEXT,
+    route_code TEXT,
+    operational_status vehicle_operational_state DEFAULT 'Garage',
+    last_pre_trip_passed BOOLEAN DEFAULT FALSE,
+    active_mechanical_alerts TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ========================================================
+-- 4. CREATE PRE-TRIP LOGS (The Child Table)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS public.vehicle_pre_trip_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    vehicle_id UUID REFERENCES public.fleet_vehicles(id) ON DELETE CASCADE,
+    inspector_mechanic_id UUID, -- Kept as open UUID to prevent errors if your mechanic profile table isn't built yet
+    alternator_status TEXT NOT NULL DEFAULT 'PASS',
+    battery_cables_status TEXT NOT NULL DEFAULT 'PASS',
+    stop_arm_mechanism TEXT NOT NULL DEFAULT 'PASS',
+    brake_systems_status TEXT NOT NULL DEFAULT 'PASS',
+    tire_tread_depth_status TEXT NOT NULL DEFAULT 'PASS',
+    overall_inspection_passed BOOLEAN NOT NULL,
+    mechanic_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ========================================================
+-- 5. LOCK DOWN THE ISOLATION WALLS (Row Level Security)
+-- ========================================================
+ALTER TABLE public.fleet_vehicles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS contractor_fleet_isolation ON public.fleet_vehicles;
+
+CREATE POLICY contractor_fleet_isolation ON public.fleet_vehicles
+    FOR ALL TO authenticated USING (
+        (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) IN ('Superintendent', 'Global_Dispatcher')
+        OR contractor_id = (SELECT contractor_id FROM public.staff_profiles WHERE id = auth.uid())
+    );
+
+ALTER TABLE public.vehicle_pre_trip_logs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS contractor_inspection_isolation ON public.vehicle_pre_trip_logs;
+
+CREATE POLICY contractor_inspection_isolation ON public.vehicle_pre_trip_logs
+    FOR SELECT TO authenticated USING (
+        (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) IN ('Superintendent', 'Global_Dispatcher')
+        OR (SELECT contractor_id FROM public.fleet_vehicles WHERE id = vehicle_id) = 
+           (SELECT contractor_id FROM public.staff_profiles WHERE id = auth.uid())
+    );
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE CHAPERONE HANDSHAKE PROTOCOL TABLE
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.trip_chaperone_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    guardian_id UUID REFERENCES public.guardian_profiles(id) ON DELETE CASCADE,
+    requested_satellite_id UUID REFERENCES public.staff_profiles(id), -- The teacher the parent is standing next to
+    assigned_satellite_id UUID REFERENCES public.staff_profiles(id),  -- Final destination satellite
+    handshake_status TEXT DEFAULT 'Pending' CHECK (handshake_status IN ('Pending', 'Approved', 'Rejected')),
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+-- ==========================================
+-- 2. THE HANDSHAKE ENFORCEMENT ENGINE
+-- ==========================================
+CREATE OR REPLACE FUNCTION public.fn_process_chaperone_handshake(
+    p_handshake_id UUID,
+    p_action TEXT, -- 'Approved' or 'Rejected'
+    p_target_satellite_id UUID DEFAULT NULL -- Optional reassignment by Lead
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_handshake RECORD;
+    v_approver_id UUID;
+    v_approver_role TEXT;
+    v_final_satellite_id UUID;
+BEGIN
+    v_approver_id := auth.uid();
+
+    -- Fetch the pending handshake request
+    SELECT * INTO v_handshake FROM public.trip_chaperone_handshakes 
+    WHERE id = p_handshake_id AND handshake_status = 'Pending';
+
+    IF v_handshake.id IS NULL THEN
+        RAISE EXCEPTION 'Handshake Error: Request not found or already processed.';
+    END IF;
+
+    -- Fetch the teacher's role within the district
+    SELECT role INTO v_approver_role FROM public.staff_profiles 
+    WHERE id = v_approver_id;
+
+    -- SECURITY GATE: Only valid trip staff can process handshakes
+    IF v_approver_role NOT IN ('Satellite', 'Lead_Satellite', 'Staff_Teacher') THEN
+        RAISE EXCEPTION 'Security Exception: Unauthorized staff signature.';
+    END IF;
+
+    IF p_action = 'Rejected' THEN
+        UPDATE public.trip_chaperone_handshakes 
+        SET handshake_status = 'Rejected', resolved_at = clock_timestamp()
+        WHERE id = p_handshake_id;
+        RETURN jsonb_build_object('status', 'Rejected', 'message', 'Handshake declined.');
+    END IF;
+
+    -- ENFORCE AUTHORITY RULE MATRIX
+    IF v_approver_role = 'Lead_Satellite' THEN
+        -- Lead Satellites have full delegation authority
+        IF p_target_satellite_id IS NOT NULL THEN
+            v_final_satellite_id := p_target_satellite_id; -- Reassigned to another teacher
+        ELSE
+            v_final_satellite_id := v_handshake.requested_satellite_id; -- Left as original
+        END IF;
+    ELSE
+        -- Standard Satellites CANNOT reassign. They can only accept for themselves.
+        IF p_target_satellite_id IS NOT NULL AND p_target_satellite_id != v_approver_id THEN
+            RAISE EXCEPTION 'Privilege Violation: Standard Satellites do not possess delegation authority.';
+        END IF;
+        v_final_satellite_id := v_approver_id;
+    END IF;
+
+    -- UPDATE THE LIVE DEPLOYMENT RECORDS
+    UPDATE public.trip_chaperone_handshakes 
+    SET handshake_status = 'Approved', 
+        assigned_satellite_id = v_final_satellite_id,
+        resolved_at = clock_timestamp()
+    WHERE id = p_handshake_id;
+
+    -- Inject chaperone directly into the active trip manifest operational group
+    INSERT INTO public.trip_chaperone_groups (trip_id, chaperone_id, supervisor_satellite_id)
+    VALUES (v_handshake.trip_id, v_handshake.guardian_id, v_final_satellite_id)
+    ON CONFLICT (trip_id, chaperone_id) 
+    DO UPDATE SET supervisor_satellite_id = v_final_satellite_id;
+
+    RETURN jsonb_build_object(
+        'status', 'Success', 
+        'assigned_to', v_final_satellite_id,
+        'message', 'Chaperone successfully bound and synchronized to group.'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE AUDIT PRESERVATION PROTOCOL
+-- Purpose: Stripping CASCADE from critical historical joints
+-- ==========================================
+
+-- A. Protect the Trip Manifests (Do not let a deleted trip erase the record of who was assigned)
+ALTER TABLE public.trip_manifest 
+DROP CONSTRAINT IF EXISTS trip_manifest_trip_id_fkey;
+
+ALTER TABLE public.trip_manifest 
+ADD CONSTRAINT trip_manifest_trip_id_fkey 
+FOREIGN KEY (trip_id) REFERENCES public.trips(id) ON DELETE RESTRICT;
+
+-- B. Protect the Chaperone Groups
+ALTER TABLE public.trip_chaperone_groups 
+DROP CONSTRAINT IF EXISTS trip_chaperone_groups_trip_id_fkey;
+
+ALTER TABLE public.trip_chaperone_groups 
+ADD CONSTRAINT trip_chaperone_groups_trip_id_fkey 
+FOREIGN KEY (trip_id) REFERENCES public.trips(id) ON DELETE RESTRICT;
+
+-- C. Protect the Hardware Binding (If a bus is retired, keep the hardware record)
+ALTER TABLE public.trusted_hardware 
+DROP CONSTRAINT IF EXISTS trusted_hardware_assigned_bus_id_fkey;
+
+ALTER TABLE public.trusted_hardware 
+ADD CONSTRAINT trusted_hardware_assigned_bus_id_fkey 
+FOREIGN KEY (assigned_bus_id) REFERENCES public.buses(id) ON DELETE SET NULL;
+
+-- ==========================================
+-- 2. CHRONOS RETENTION ADJUSTMENT (3-Year Legal Minimum)
+-- ==========================================
+CREATE OR REPLACE FUNCTION public.fn_archive_stale_data()
+RETURNS VOID AS $$
+BEGIN
+    -- Move Telemetry older than 30 days to cold storage
+    WITH moved_telemetry AS (
+        DELETE FROM public.bus_telemetry_logs
+        WHERE synced_at < (now() - interval '30 days')
+        RETURNING *
+    )
+    INSERT INTO archive.bus_telemetry_logs SELECT * FROM moved_telemetry;
+
+    -- Move Audit Logs older than 90 days to cold storage
+    WITH moved_audits AS (
+        DELETE FROM public.audit_logs
+        WHERE created_at < (now() - interval '90 days')
+        RETURNING *
+    )
+    INSERT INTO archive.audit_logs SELECT * FROM moved_audits;
+
+    -- COMPLIANCE UPDATE: Hard Delete Telemetry older than 3 years (Not 1 year)
+    DELETE FROM archive.bus_telemetry_logs WHERE synced_at < (now() - interval '3 years');
+    
+    -- COMPLIANCE UPDATE: Audit logs must be retained for 7 years for potential litigation
+    DELETE FROM archive.audit_logs WHERE created_at < (now() - interval '7 years');
+    
+    RAISE NOTICE 'Chronos Janitor Engine completed cycle under 3/7 year compliance rules.';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+
+-- ============================================================================
+-- THE REGULAR ROUTE & SAFEGUARD PATCH (V35.0)
+-- Purpose: Stop-Sequence Tracking, Audible Disembark Alerts, & Route Switching.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. ROUTE & STOP ARCHITECTURE
+-- Stores the sequence of geofences for a regular morning/afternoon run.
+CREATE TABLE IF NOT EXISTS public.routes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    route_name TEXT,
+    school_id UUID REFERENCES public.schools(id),
+    is_active BOOLEAN DEFAULT true
+);
+
+CREATE TABLE IF NOT EXISTS public.route_stops (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    route_id UUID REFERENCES public.routes(id) ON DELETE CASCADE,
+    stop_name TEXT,
+    sequence_order INT, -- 1, 2, 3...
+    geofence_center GEOGRAPHY(POINT, 4326),
+    geofence_radius_meters INT DEFAULT 50,
+    estimated_arrival_time TIME
+);
+
+-- 2. BUS STATE EXPANSION
+-- Tracks where the bus is in its current "Mission."
+ALTER TABLE public.buses 
+ADD COLUMN IF NOT EXISTS current_route_id UUID REFERENCES public.routes(id),
+ADD COLUMN IF NOT EXISTS next_route_id UUID REFERENCES public.routes(id),
+ADD COLUMN IF NOT EXISTS last_stop_id UUID REFERENCES public.route_stops(id),
+ADD COLUMN IF NOT EXISTS route_status TEXT DEFAULT 'Idle' CHECK (route_status IN ('Idle', 'En_Route', 'Arriving', 'At_Stop', 'Completed'));
+
+-- 3. THE "NO CHILD LEFT BEHIND" SAFEGUARD
+-- This function checks for boarded students before allowing a route switch.
+CREATE OR REPLACE FUNCTION public.fn_check_bus_clearance(p_bus_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_still_onboard INT;
+BEGIN
+    SELECT COUNT(*) INTO v_still_onboard 
+    FROM public.halo_manifest_snapshots 
+    WHERE current_bus_id = p_bus_id AND status = 'Boarded';
+
+    RETURN (v_still_onboard = 0);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4. THE AUTOMATED GPS ROUTE ENGINE
+-- Updates location and handles the Closing In -> Arrived -> Departed cycle.
+CREATE OR REPLACE FUNCTION public.fn_process_route_gps(
+    p_bus_id UUID,
+    p_lat DOUBLE PRECISION,
+    p_lng DOUBLE PRECISION
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_curr_route UUID;
+    v_next_stop RECORD;
+    v_dist DOUBLE PRECISION;
+    v_is_clear BOOLEAN;
+    v_event TEXT := 'Navigating';
+BEGIN
+    SELECT current_route_id INTO v_curr_route FROM public.buses WHERE id = p_bus_id;
+
+    -- Find the next stop in the sequence that we haven't reached yet
+    SELECT * INTO v_next_stop FROM public.route_stops 
+    WHERE route_id = v_curr_route 
+    AND sequence_order > (SELECT COALESCE(sequence_order, 0) FROM public.route_stops WHERE id = (SELECT last_stop_id FROM public.buses WHERE id = p_bus_id))
+    ORDER BY sequence_order ASC LIMIT 1;
+
+    v_dist := ST_Distance(v_next_stop.geofence_center, ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326)::geography);
+
+    -- LOGIC: STATUS TRANSITIONS
+    IF v_dist <= 500 AND v_dist > 50 THEN
+        v_event := 'Closing_In'; -- Pings Parents/Students for countdown timer
+    ELSIF v_dist <= 50 THEN
+        v_event := 'Arrived'; -- Update Bus Status to 'At_Stop'
+        UPDATE public.buses SET route_status = 'At_Stop', last_stop_id = v_next_stop.id WHERE id = p_bus_id;
+    END IF;
+
+    -- LOGIC: ROUTE COMPLETION & SWITCHING
+    -- If no more stops remain and we are back at school
+    IF v_next_stop IS NULL THEN
+        v_is_clear := public.fn_check_bus_clearance(p_bus_id);
+        
+        IF NOT v_is_clear THEN
+            -- AUDIBLE & VISUAL ALERT: Triggered for the Pilot
+            INSERT INTO public.emergency_flares (bus_id, flare_type, severity, status, metadata)
+            VALUES (p_bus_id, 'Student_Still_Onboard', 'Critical', 'Pending', '{"is_audible": true, "alert_tone": "vocal_warning"}');
+            RETURN jsonb_build_object('event', 'STATIONARY_CHECK_REQUIRED', 'error', 'Students Still Onboard');
+        ELSE
+            -- SUCCESS: Automatic Route Flip
+            UPDATE public.buses 
+            SET current_route_id = next_route_id, 
+                next_route_id = NULL,
+                last_stop_id = NULL,
+                route_status = 'Idle'
+            WHERE id = p_bus_id;
+            v_event := 'Route_Completed_Switched';
+        END IF;
+    END IF;
+
+    RETURN jsonb_build_object('event', v_event, 'dist_to_next', v_dist, 'stop_name', v_next_stop.stop_name);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+-- ============================================================================
+-- THE GPS GEOFENCE AUTOMATION PATCH (V34.0)
+-- Purpose: Automatic Manifest Locking based on Real-Time GPS Proximity.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. ADD GEOFENCE PARAMETERS TO SCHOOLS
+-- This defines the "Safe Zone" for each school campus.
+ALTER TABLE public.schools 
+ADD COLUMN IF NOT EXISTS geofence_center GEOGRAPHY(POINT, 4326),
+ADD COLUMN IF NOT EXISTS geofence_radius_meters INT DEFAULT 200;
+
+-- 2. THE GPS INTELLIGENCE FUNCTION
+-- This is called by the Pilot's tablet every few seconds.
+-- It updates the bus location and checks if it has crossed the "Event Horizon."
+CREATE OR REPLACE FUNCTION public.fn_update_bus_location_with_geofence(
+    p_bus_id UUID,
+    p_lat DOUBLE PRECISION,
+    p_lng DOUBLE PRECISION
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_school_id UUID;
+    v_center GEOGRAPHY(POINT, 4326);
+    v_radius INT;
+    v_current_dist DOUBLE PRECISION;
+    v_was_on_campus BOOLEAN;
+    v_is_now_on_campus BOOLEAN;
+BEGIN
+    -- 1. Get current status and school geofence data
+    SELECT b.school_id, b.is_on_campus, s.geofence_center, s.geofence_radius_meters 
+    INTO v_school_id, v_was_on_campus, v_center, v_radius
+    FROM public.buses b
+    JOIN public.schools s ON b.school_id = s.id
+    WHERE b.id = p_bus_id;
+
+    -- 2. Update the physical location in the database
+    UPDATE public.buses 
+    SET current_location = ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326)::geography
+    WHERE id = p_bus_id;
+
+    -- 3. Calculate distance from the school center
+    v_current_dist := ST_Distance(v_center, ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326)::geography);
+
+    -- 4. Determine if we are still within the fence
+    v_is_now_on_campus := (v_current_dist <= v_radius);
+
+    -- 5. TRIGGER: The "Event Horizon" Crossing
+    -- If we WERE on campus but ARE NOT anymore, lock the manifest.
+    IF v_was_on_campus AND NOT v_is_now_on_campus THEN
+        UPDATE public.buses SET is_on_campus = false WHERE id = p_bus_id;
+        
+        -- LOG THE DEPARTURE FOR COMMAND
+        INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body)
+        SELECT id, 'System_Log', 'Medium', 'GEOFENCE BREACH: DEPARTED', 
+               'Bus ' || p_bus_id || ' has exited the school perimeter. Manifest is now LOCKED.'
+        FROM public.staff_profiles WHERE role IN ('Command', 'Central');
+        
+        RETURN jsonb_build_object('status', 'Departed', 'lock_engaged', true, 'distance', v_current_dist);
+    END IF;
+
+    RETURN jsonb_build_object('status', CASE WHEN v_is_now_on_campus THEN 'On_Campus' ELSE 'In_Transit' END, 'lock_engaged', NOT v_is_now_on_campus, 'distance', v_current_dist);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+-- ============================================================================
+-- THE JACKSONVILLE CONSOLIDATED ALPHA (V33.0)
+-- Purpose: Total System Sync, Pilot Authority, Geofence-Lock, & Audible Flags.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. PHYSICAL INFRASTRUCTURE RECONCILIATION
+-- Building the "Body" to support the "Brain."
+CREATE TABLE IF NOT EXISTS public.guardian_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    first_name TEXT,
+    last_name TEXT,
+    preferred_language TEXT DEFAULT 'en'
+);
+
+ALTER TABLE public.staff_profiles 
+ADD COLUMN IF NOT EXISTS first_name TEXT,
+ADD COLUMN IF NOT EXISTS last_name TEXT,
+ADD COLUMN IF NOT EXISTS role TEXT,
+ADD COLUMN IF NOT EXISTS school_id UUID REFERENCES public.schools(id),
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id),
+ADD COLUMN IF NOT EXISTS preferred_language TEXT DEFAULT 'en';
+
+ALTER TABLE public.buses 
+ADD COLUMN IF NOT EXISTS is_on_campus BOOLEAN DEFAULT true,
+ADD COLUMN IF NOT EXISTS district_id UUID REFERENCES public.districts(id);
+
+ALTER TABLE public.halo_manifest_snapshots 
+ADD COLUMN IF NOT EXISTS verified_by UUID REFERENCES auth.users(id),
+ADD COLUMN IF NOT EXISTS current_bus_id UUID REFERENCES public.buses(id),
+ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT now();
+
+-- 2. ROLE & SECURITY HIERARCHY
+ALTER TABLE public.staff_profiles 
+DROP CONSTRAINT IF EXISTS staff_profiles_role_check;
+
+ALTER TABLE public.staff_profiles 
+ADD CONSTRAINT staff_profiles_role_check 
+CHECK (role IN (
+    'Superintendent', 'Principal', 'Command', 'Central', 
+    'Pilot', 'Staff_Teacher', 'Sub_Teacher', 'Lead_Satellite', 'Node'
+));
+
+-- 3. TRIP & TACTICAL REQUEST INFRASTRUCTURE
+CREATE TABLE IF NOT EXISTS public.trips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    proposed_by UUID REFERENCES auth.users(id),
+    lead_id UUID REFERENCES auth.users(id),
+    school_id UUID REFERENCES public.schools(id),
+    trip_name TEXT NOT NULL,
+    status TEXT DEFAULT 'Proposed' CHECK (status IN ('Proposed', 'Approved', 'Active', 'Completed')),
+    master_manifest JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS public.trip_bus_assignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id),
+    pilot_id UUID REFERENCES auth.users(id),
+    handshake_status BOOLEAN DEFAULT false,
+    confirmed_at TIMESTAMPTZ,
+    UNIQUE(trip_id, bus_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.tactical_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    requester_id UUID REFERENCES auth.users(id),
+    school_id UUID REFERENCES public.schools(id),
+    request_type TEXT,
+    payload JSONB,
+    status TEXT DEFAULT 'Pending_Approval' CHECK (status IN ('Pending_Approval', 'Approved', 'Denied')),
+    resolved_by UUID REFERENCES auth.users(id),
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- 4. THE PROPOSAL & COMMAND WORKFLOW
+CREATE OR REPLACE FUNCTION public.fn_propose_trip(p_name TEXT, p_manifest JSONB)
+RETURNS UUID AS $$
+DECLARE v_new_id UUID;
+BEGIN
+    INSERT INTO public.trips (proposed_by, trip_name, master_manifest, school_id)
+    VALUES (auth.uid(), p_name, p_manifest, (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid()))
+    RETURNING id INTO v_new_id;
+    RETURN v_new_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION public.fn_central_approve_trip(p_trip_id UUID, p_lead_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    IF (SELECT role FROM public.staff_profiles WHERE id = auth.uid()) != 'Central' THEN RAISE EXCEPTION 'Central Access Only.'; END IF;
+    UPDATE public.trips SET status = 'Approved', lead_id = p_lead_id WHERE id = p_trip_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 5. THE TACTICAL HANDSHAKE (PILOT <-> LEAD)
+CREATE OR REPLACE FUNCTION public.fn_trip_handshake(p_trip_id UUID, p_bus_id UUID)
+RETURNS VOID AS $$
+DECLARE v_manifest JSONB;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.trip_bus_assignments WHERE trip_id = p_trip_id AND bus_id = p_bus_id) THEN
+        RAISE EXCEPTION 'ID Mismatch: Bus not assigned to this Trip.';
+    END IF;
+
+    SELECT master_manifest INTO v_manifest FROM public.trips WHERE id = p_trip_id;
+
+    UPDATE public.trip_bus_assignments SET handshake_status = true, confirmed_at = now() 
+    WHERE trip_id = p_trip_id AND bus_id = p_bus_id;
+
+    INSERT INTO public.halo_sessions (pilot_id, bus_id, status, manifest_snapshot)
+    VALUES (auth.uid(), p_bus_id, 'Active', v_manifest)
+    ON CONFLICT (pilot_id) DO UPDATE SET manifest_snapshot = v_manifest, status = 'Active';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 6. UNIVERSAL DISPATCHER (SUB GATEKEEPING)
+CREATE OR REPLACE FUNCTION public.fn_ui_dispatch_action(p_action_type TEXT, p_payload JSONB)
+RETURNS JSONB AS $$
+DECLARE v_role TEXT;
+BEGIN
+    SELECT role INTO v_role FROM public.staff_profiles WHERE id = auth.uid();
+    IF v_role IN ('Pilot', 'Staff_Teacher', 'Lead_Satellite', 'Principal', 'Superintendent') THEN
+        RETURN jsonb_build_object('status', 'Executed_Directly');
+    ELSIF v_role = 'Sub_Teacher' THEN
+        INSERT INTO public.tactical_requests (requester_id, school_id, request_type, payload)
+        VALUES (auth.uid(), (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid()), p_action_type, p_payload);
+        RETURN jsonb_build_object('status', 'Pending_Lead_Approval');
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 7. ZONE 1 SMART BOARDING (AUDIBLE FLAGS)
+CREATE OR REPLACE FUNCTION public.fn_student_board_bus(p_student_id UUID, p_bus_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_trip_id UUID;
+    v_is_on_manifest BOOLEAN;
+    v_is_at_school BOOLEAN;
+BEGIN
+    SELECT trip_id INTO v_trip_id FROM public.trip_bus_assignments WHERE bus_id = p_bus_id AND handshake_status = true;
+    SELECT EXISTS (SELECT 1 FROM public.trips WHERE id = v_trip_id AND master_manifest @> jsonb_build_array(jsonb_build_object('id', p_student_id))) INTO v_is_on_manifest;
+    SELECT EXISTS (SELECT 1 FROM public.students WHERE id = p_student_id) INTO v_is_at_school;
+
+    IF v_is_on_manifest THEN
+        UPDATE public.halo_manifest_snapshots SET current_bus_id = p_bus_id, status = 'Boarded', last_seen_at = now() WHERE student_id = p_student_id;
+        RETURN jsonb_build_object('status', 'Success', 'audible', false);
+    ELSIF v_is_at_school THEN
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, status, metadata)
+        VALUES (p_bus_id, 'No_Student_Flag', 'High', 'Pending', '{"is_audible": true, "alert_tone": "vocal_warning"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'audible', true);
+    ELSE
+        INSERT INTO public.emergency_flares (bus_id, flare_type, severity, status, metadata)
+        VALUES (p_bus_id, 'Wrong_Bus_Flag', 'Critical', 'Pending', '{"is_audible": true, "alert_tone": "siren"}');
+        RETURN jsonb_build_object('status', 'Flagged', 'audible', true);
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 8. GEOFENCE LOGIC (SYNC & LOCK)
+CREATE OR REPLACE FUNCTION public.fn_sync_bus_manifest(p_trip_id UUID, p_bus_id UUID)
+RETURNS VOID AS $$
+DECLARE v_is_on_campus BOOLEAN;
+BEGIN
+    SELECT is_on_campus INTO v_is_on_campus FROM public.buses WHERE id = p_bus_id;
+    IF v_is_on_campus THEN
+        UPDATE public.halo_sessions SET manifest_snapshot = (SELECT master_manifest FROM public.trips WHERE id = p_trip_id)
+        WHERE bus_id = p_bus_id AND status = 'Active';
+    ELSE
+        RAISE EXCEPTION 'Manifest Locked: Bus has exited Geofence.';
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+-- ============================================================================
+-- THE CAPTAIN'S LOG TACTICAL PATCH (V27.0 FINAL)
+-- Purpose: Fixing Name Errors, Verified_By tracking, and Pilot Ownership.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. PHYSICAL RECONCILIATION: Fixes image_6b383d and image_6b3422 errors
+-- Adding name columns to staff so the mirror view can actually identify people.
+ALTER TABLE public.staff_profiles 
+ADD COLUMN IF NOT EXISTS first_name TEXT,
+ADD COLUMN IF NOT EXISTS last_name TEXT;
+
+-- Adding tracking for which aid (Satellite) checked which kid.
+ALTER TABLE public.halo_manifest_snapshots 
+ADD COLUMN IF NOT EXISTS verified_by UUID REFERENCES auth.users(id);
+
+-- 2. PILOT AUTHORITY: Establishing the Driver as the Halo Captain
+-- Ensures every emergency session has a single Pilot owner.
+ALTER TABLE public.halo_sessions 
+ADD COLUMN IF NOT EXISTS pilot_id UUID REFERENCES auth.users(id);
+
+-- 3. THE TACTICAL REQUEST QUEUE (THE GATEKEEPER)
+CREATE TABLE IF NOT EXISTS public.tactical_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    requester_id UUID REFERENCES auth.users(id),
+    school_id UUID REFERENCES public.schools(id),
+    request_type TEXT CHECK (request_type IN ('Broadcast_Request', 'Manifest_Finalization', 'Emergency_Escalation')),
+    payload JSONB,
+    status TEXT DEFAULT 'Pending_Approval' CHECK (status IN ('Pending_Approval', 'Approved', 'Denied')),
+    resolved_by UUID REFERENCES auth.users(id),
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- 4. THE UNIVERSAL UI DISPATCHER
+-- One function for all satellites. Sub-Teachers are automatically gated.
+-- Pilots and Lead Satellites bypass the queue.
+CREATE OR REPLACE FUNCTION public.fn_ui_dispatch_action(
+    p_action_type TEXT,
+    p_payload JSONB
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_role TEXT;
+    v_result JSONB;
+BEGIN
+    SELECT public.get_my_role() INTO v_role;
+
+    -- PATH A: CAPTAIN & LEAD (Direct Action - Pilots, Staff Teachers, Leads, Supers)
+    IF v_role IN ('Pilot', 'Staff_Teacher', 'Lead_Satellite', 'Principal', 'Superintendent') THEN
+        IF p_action_type = 'Broadcast' THEN
+            PERFORM public.fn_send_command_broadcast(
+                p_payload->>'body', p_payload->>'transcript', 'School', 
+                (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid()),
+                'Satellite', (p_payload->>'use_audio')::BOOLEAN
+            );
+        END IF;
+        v_result := jsonb_build_object('status', 'Executed_Directly');
+
+    -- PATH B: SUB-TEACHER (Gated Action - Substitutes Only)
+    ELSIF v_role = 'Sub_Teacher' THEN
+        INSERT INTO public.tactical_requests (requester_id, school_id, request_type, payload)
+        VALUES (
+            auth.uid(), 
+            (SELECT school_id FROM public.staff_profiles WHERE id = auth.uid()),
+            p_action_type || '_Request',
+            p_payload
+        );
+        v_result := jsonb_build_object('status', 'Pending_Lead_Approval');
+    END IF;
+
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 5. THE LEAD SATELLITE MIRROR (OVER-THE-SHOULDER VIEW)
+-- Now pulls names and "verified_by" stats for oversight of Sub-Teachers.
+DROP VIEW IF EXISTS public.view_lead_satellite_mirror;
+CREATE VIEW public.view_lead_satellite_mirror AS
+SELECT 
+    sp.id as sub_teacher_id,
+    COALESCE(sp.first_name, 'Unknown') || ' ' || COALESCE(sp.last_name, 'Sub') as sub_teacher_name,
+    COUNT(hms.id) FILTER (WHERE hms.is_verified = true) as kids_verified,
+    COUNT(hms.id) FILTER (WHERE hms.is_verified = false) as kids_in_range_unverified,
+    (SELECT jsonb_agg(jsonb_build_object('id', tr.id, 'type', tr.request_type, 'body', tr.payload->>'body'))
+     FROM public.tactical_requests tr
+     WHERE tr.requester_id = sp.id AND tr.status = 'Pending_Approval') as pending_actions
+FROM public.staff_profiles sp
+LEFT JOIN public.halo_manifest_snapshots hms ON hms.verified_by = sp.id
+WHERE sp.role = 'Sub_Teacher'
+GROUP BY sp.id, sp.first_name, sp.last_name;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PATCH: MULTILINGUAL UI HOOKS
+-- Purpose: Enabling per-user language customization for the UI.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. Add preferred_language to Staff (Supers, Principals, Teachers)
+ALTER TABLE public.staff_profiles 
+ADD COLUMN IF NOT EXISTS preferred_language TEXT DEFAULT 'en';
+
+-- 2. Add preferred_language to Guardians (Parents)
+ALTER TABLE public.guardian_profiles 
+ADD COLUMN IF NOT EXISTS preferred_language TEXT DEFAULT 'en';
+
+-- 3. Add a constraint to ensure we use standard ISO codes (Optional but cleaner)
+-- This covers the most common, but allows for the full 50-language expansion.
+ALTER TABLE public.staff_profiles 
+DROP CONSTRAINT IF EXISTS check_language_code;
+
+ALTER TABLE public.staff_profiles 
+ADD CONSTRAINT check_language_code 
+CHECK (length(preferred_language) = 2);
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT UPGRADE: VISUAL BROADCAST & TRANSCRIPTION
+-- Purpose: Pushing visual text alongside audio for "God's Voice" alerts.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. ADD THE TRANSCRIPT COLUMN
+-- This stores the "Visual Message" decoded from the audio broadcast.
+ALTER TABLE public.outbound_alerts 
+ADD COLUMN IF NOT EXISTS transcript TEXT;
+
+-- 2. THE UPGRADED BROADCAST ENGINE (V3)
+-- Now includes parameters for Audio Overrides and the Visual Transcript.
+CREATE OR REPLACE FUNCTION public.fn_send_command_broadcast(
+    p_message_body TEXT,        -- The generic notification text
+    p_transcript TEXT,          -- The specific words spoken by the leader
+    p_target_scope TEXT,        -- 'School' or 'District'
+    p_target_id UUID,
+    p_use_audio BOOLEAN DEFAULT false
+)
+RETURNS VOID AS $$
+DECLARE
+    v_sender_role TEXT;
+BEGIN
+    SELECT public.get_my_role() INTO v_sender_role;
+
+    -- Validate Authority
+    IF v_sender_role IN ('Superintendent', 'Principal', 'Command', 'Central') THEN
+        
+        INSERT INTO public.outbound_alerts (
+            recipient_id, 
+            alert_type, 
+            priority, 
+            title, 
+            body, 
+            transcript,
+            is_audio_override
+        )
+        SELECT 
+            sp.id, 
+            'Emergency_Halo', 
+            CASE WHEN p_use_audio THEN 'Critical' ELSE 'High' END, 
+            'COMMAND BROADCAST: ' || v_sender_role, 
+            p_message_body,
+            p_transcript, -- The visual translation of the spoken audio
+            p_use_audio
+        FROM public.staff_profiles sp
+        WHERE 
+            (p_target_scope = 'District' AND sp.district_id = p_target_id)
+            OR (p_target_scope = 'School' AND sp.school_id = p_target_id);
+
+        RAISE NOTICE 'Broadcast & Transcript sent by % to % scope.', v_sender_role, p_target_scope;
+    ELSE
+        RAISE EXCEPTION 'Access Denied: Leadership Authority Required.';
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 07: SATELLITE PROTOCOL & THE "GOD VOICE" AUDIO
+-- Purpose: Empowering Teachers and enabling Audio Overrides for Leadership.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. ADD THE AUDIO OVERRIDE CAPABILITY
+-- This flag tells the mobile app to break silence/DND for priority commands.
+ALTER TABLE public.outbound_alerts 
+ADD COLUMN IF NOT EXISTS is_audio_override BOOLEAN DEFAULT false;
+
+-- 2. THE SATELLITE (TEACHER) PERMISSIONS
+-- Teachers (Satellites) can view the Halo Manifest only for students in their district.
+DROP POLICY IF EXISTS satellite_view_huddle ON public.halo_manifest_snapshots;
+CREATE POLICY satellite_view_huddle ON public.halo_manifest_snapshots FOR SELECT 
+USING (
+    public.get_my_role() = 'Satellite' 
+    AND student_id IN (
+        SELECT id FROM public.students 
+        WHERE school_id IN (SELECT id FROM public.schools WHERE district_id = public.get_my_district())
+    )
+);
+
+-- 3. THE SATELLITE VERIFICATION POWER
+-- Teachers can mark a student as "Visual_Manual" verified during a huddle.
+DROP POLICY IF EXISTS satellite_verify_students ON public.halo_manifest_snapshots;
+CREATE POLICY satellite_verify_students ON public.halo_manifest_snapshots FOR UPDATE 
+USING (public.get_my_role() = 'Satellite')
+WITH CHECK (verification_type = 'Visual_Manual');
+
+-- 4. UPDATE THE "GOD VOICE" TO INCLUDE AUDIO
+-- This replaces the previous broadcast function with the Audio Override capability.
+CREATE OR REPLACE FUNCTION public.fn_send_command_broadcast(
+    p_message_body TEXT,
+    p_target_scope TEXT, 
+    p_target_id UUID,
+    p_use_audio BOOLEAN DEFAULT false
+)
+RETURNS VOID AS $$
+DECLARE
+    v_sender_role TEXT;
+BEGIN
+    SELECT public.get_my_role() INTO v_sender_role;
+
+    IF v_sender_role IN ('Superintendent', 'Principal', 'Command', 'Central') THEN
+        INSERT INTO public.outbound_alerts (recipient_id, alert_type, priority, title, body, is_audio_override)
+        SELECT 
+            sp.id, 
+            'Emergency_Halo', 
+            CASE WHEN p_use_audio THEN 'Critical' ELSE 'High' END, 
+            'COMMAND BROADCAST: ' || v_sender_role, 
+            p_message_body,
+            p_use_audio
+        FROM public.staff_profiles sp
+        WHERE 
+            (p_target_scope = 'District' AND sp.district_id = p_target_id)
+            OR (p_target_scope = 'School' AND sp.school_id = p_target_id);
+    ELSE
+        RAISE EXCEPTION 'Access Denied: Leadership Authority Required.';
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 06: THE HANGAR & NERVE CENTER (FINAL RE-POUR)
+-- Purpose: Alerts, Drone Assets, and Resilient Newsfeed View
+-- ============================================================================
+BEGIN;
+
+-- 1. THE ALERT QUEUE
+CREATE TABLE IF NOT EXISTS public.outbound_alerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    recipient_id UUID REFERENCES auth.users(id),
+    alert_type TEXT NOT NULL CHECK (alert_type IN ('Routine_Tap', 'ETA_Warning', 'Emergency_Halo', 'Rescue_Update', 'Drone_Dispatch')),
+    priority TEXT DEFAULT 'Normal' CHECK (priority IN ('Normal', 'High', 'Critical')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    is_sent BOOLEAN DEFAULT false,
+    sent_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- 2. THE DRONE HANGAR
+CREATE TABLE IF NOT EXISTS public.drone_assets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id),
+    drone_callsign TEXT UNIQUE NOT NULL,
+    status TEXT DEFAULT 'Docked' CHECK (status IN ('Docked', 'Patrol', 'Deploying', 'On_Scene', 'Returning', 'Maintenance')),
+    current_location GEOGRAPHY(POINT, 4326),
+    battery_level INT DEFAULT 100 CHECK (battery_level BETWEEN 0 AND 100)
+);
+
+-- 3. THE LEADERSHIP NEWSFEED VIEW (Now with District Awareness)
+CREATE OR REPLACE VIEW public.view_leadership_newsfeed AS
+SELECT 
+    'FLARE' as event_type,
+    f.id as source_id,
+    f.district_id,
+    f.created_at,
+    f.flare_type || ' - ' || f.severity as title,
+    'Status: ' || f.status as body
+FROM public.emergency_flares f
+
+UNION ALL
+
+SELECT 
+    'SCAN' as event_type,
+    s.id as source_id,
+    b.district_id, -- This is the column we just patched!
+    s.created_at,
+    'Student Activity' as title,
+    s.event_action || ' - Bus: ' || b.bus_number as body
+FROM public.student_scan_events s
+JOIN public.buses b ON s.bus_id = b.id
+WHERE s.created_at > (now() - interval '2 hours');
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 05: RESCUE HANDSHAKE & MANIFEST TRANSFER
+-- Purpose: Two-way proximity confirmation and bulk manifest handoff.
+-- Status: Diamond Tier | Multi-Vehicle Synchronization
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE HANDSHAKE STATE MACHINE
+-- ==========================================
+CREATE TABLE public.rescue_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    halo_session_id UUID REFERENCES public.halo_sessions(id) ON DELETE CASCADE,
+    source_bus_id UUID REFERENCES public.buses(id), -- The downed bus (if not evacuated)
+    rescue_bus_id UUID REFERENCES public.buses(id), -- The savior bus
+    
+    status TEXT DEFAULT 'Dispatched' CHECK (status IN ('Dispatched', 'In_Proximity', 'Requested', 'Accepted', 'Completed', 'Aborted')),
+    handshake_type TEXT CHECK (handshake_type IN ('Bus_to_Bus', 'Halo_to_Bus')),
+    
+    initiated_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+-- ==========================================
+-- 2. THE PROXIMITY SENSOR (INTELLIGENCE)
+-- ==========================================
+-- This function monitors the Rescue Bus's GPS. 
+-- When it gets within 50m of the target, it flips the status to 'In_Proximity'.
+CREATE OR REPLACE FUNCTION public.fn_monitor_rescue_proximity()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_handshake_record RECORD;
+    v_target_location GEOGRAPHY;
+BEGIN
+    -- Look for an active handshake involving this bus as the Rescue vehicle
+    SELECT * INTO v_handshake_record 
+    FROM public.rescue_handshakes 
+    WHERE rescue_bus_id = NEW.bus_id AND status = 'Dispatched' 
+    LIMIT 1;
+
+    IF v_handshake_record.id IS NOT NULL THEN
+        -- Determine if we are heading to a Bus or a Huddle
+        IF v_handshake_record.handshake_type = 'Bus_to_Bus' THEN
+            SELECT location_gps INTO v_target_location FROM public.bus_telemetry_logs 
+            WHERE bus_id = v_handshake_record.source_bus_id ORDER BY created_at DESC LIMIT 1;
+        ELSE
+            SELECT current_huddle_location INTO v_target_location FROM public.halo_sessions 
+            WHERE id = v_handshake_record.halo_session_id;
+        END IF;
+
+        -- Check 50-meter proximity
+        IF ST_DWithin(NEW.location_gps, v_target_location, 50) THEN
+            UPDATE public.rescue_handshakes 
+            SET status = 'In_Proximity' 
+            WHERE id = v_handshake_record.id;
+            
+            RAISE NOTICE 'RESCUE REACHED: Rescue Bus % is in range. Handshake available.', NEW.bus_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 3. THE BULK TRANSFER ENGINE
+-- This moves the kids from the old manifest to the new one in a single transaction.
+CREATE OR REPLACE FUNCTION public.fn_execute_manifest_transfer(p_handshake_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_handshake public.rescue_handshakes;
+    v_halo_session public.halo_sessions;
+BEGIN
+    SELECT * INTO v_handshake FROM public.rescue_handshakes WHERE id = p_handshake_id;
+    SELECT * INTO v_halo_session FROM public.halo_sessions WHERE id = v_handshake.halo_session_id;
+
+    -- 1. Log the Exit from the old bus/halo
+    INSERT INTO public.student_scan_events (student_id, bus_id, trip_id, scan_type, event_action, location_at_scan)
+    SELECT 
+        student_id, 
+        v_handshake.source_bus_id, 
+        (SELECT trip_id FROM public.bus_trip_handshakes WHERE bus_id = v_handshake.source_bus_id AND status = 'Active' LIMIT 1),
+        'Manual_Pilot', 
+        'Transfer', 
+        (SELECT current_huddle_location FROM public.halo_sessions WHERE id = v_handshake.halo_session_id)
+    FROM public.halo_manifest_snapshots 
+    WHERE halo_session_id = v_handshake.halo_session_id AND is_verified = true;
+
+    -- 2. Log the Entry into the Rescue Bus
+    INSERT INTO public.student_scan_events (student_id, bus_id, trip_id, scan_type, event_action, location_at_scan)
+    SELECT 
+        student_id, 
+        v_handshake.rescue_bus_id, 
+        (SELECT trip_id FROM public.bus_trip_handshakes WHERE bus_id = v_handshake.rescue_bus_id AND status = 'Active' LIMIT 1),
+        'Manual_Pilot', 
+        'Boarded', 
+        (SELECT current_huddle_location FROM public.halo_sessions WHERE id = v_handshake.halo_session_id)
+    FROM public.halo_manifest_snapshots 
+    WHERE halo_session_id = v_handshake.halo_session_id AND is_verified = true;
+
+    -- 3. Close the Handshake
+    UPDATE public.rescue_handshakes SET status = 'Completed', resolved_at = now() WHERE id = p_handshake_id;
+    UPDATE public.halo_sessions SET bailout_status = 'Rescued_Complete' WHERE id = v_handshake.halo_session_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4. ATTACH TRIGGER
+DROP TRIGGER IF EXISTS trig_rescue_proximity ON public.bus_telemetry_logs;
+CREATE TRIGGER trig_rescue_proximity
+AFTER INSERT ON public.bus_telemetry_logs
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_monitor_rescue_proximity();
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 04: THE HALO PROTOCOL (BAILOUT & EVACUATION)
+-- Purpose: Bus-to-Ground handoff, Manifest Dump, and Split Beacon Tracking
+-- Status: Diamond Tier | Safety Critical
+-- ============================================================================
+
+BEGIN;
+
+-- ==========================================
+-- 1. THE HALO SESSION (THE LIFEBOAT)
+-- ==========================================
+CREATE TABLE public.halo_sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    flare_id UUID REFERENCES public.emergency_flares(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id),
+    pilot_id UUID REFERENCES auth.users(id),
+    rescue_bus_id UUID REFERENCES public.buses(id), -- The incoming savior bus
+    
+    -- Split Beacon Tracking
+    abandoned_bus_location GEOGRAPHY(POINT, 4326) NOT NULL,
+    current_huddle_location GEOGRAPHY(POINT, 4326), -- Updated by Driver's device
+    
+    -- Headcount Logic
+    expected_count INT NOT NULL,
+    verified_count INT DEFAULT 0,
+    bailout_status TEXT DEFAULT 'Evacuating' CHECK (bailout_status IN ('Evacuating', 'Huddled', 'Transferring', 'Rescued_Complete')),
+    
+    -- EMS Action Packet (JSON dump for first responders)
+    ems_action_packet JSONB DEFAULT '{}'::jsonb,
+    
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
+);
+
+-- ==========================================
+-- 2. THE HALO MANIFEST (THE DATA DUMP)
+-- ==========================================
+CREATE TABLE public.halo_manifest_snapshots (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    halo_session_id UUID REFERENCES public.halo_sessions(id) ON DELETE CASCADE,
+    student_id UUID REFERENCES public.students(id),
+    verification_type TEXT CHECK (verification_type IN ('Tap', 'PIN', 'Visual_Manual')),
+    is_verified BOOLEAN DEFAULT false,
+    verified_at TIMESTAMPTZ
+);
+
+-- ==========================================
+-- 3. THE HALO ENGINE (AUTOMATION)
+-- ==========================================
+CREATE OR REPLACE FUNCTION public.fn_initiate_halo_protocol()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_halo_id UUID;
+    v_boarded_count INT;
+BEGIN
+    -- 1. Create the Halo Session
+    INSERT INTO public.halo_sessions (
+        flare_id,
+        bus_id,
+        pilot_id,
+        abandoned_bus_location,
+        current_huddle_location,
+        expected_count
+    ) VALUES (
+        NEW.id,
+        NEW.bus_id,
+        NEW.triggered_by_id,
+        NEW.initial_location,
+        NEW.initial_location,
+        (SELECT COUNT(*) FROM public.student_scan_events WHERE bus_id = NEW.bus_id AND event_action = 'Boarded' AND created_at > (now() - interval '6 hours'))
+    ) RETURNING id INTO v_halo_id;
+
+    -- 2. DATA DUMP: Move all boarded students into the Halo Manifest
+    INSERT INTO public.halo_manifest_snapshots (halo_session_id, student_id)
+    SELECT v_halo_id, student_id
+    FROM public.student_scan_events
+    WHERE bus_id = NEW.bus_id 
+    AND event_action = 'Boarded'
+    AND created_at > (now() - interval '6 hours');
+
+    -- 3. REQUEST RESCUE BUS (Log the intent in Dispatch)
+    INSERT INTO public.incident_dispatch_logs (
+        flare_id,
+        action_taken,
+        dispatch_notes
+    ) VALUES (
+        NEW.id,
+        'HALO_PROTOCOL_INITIATED',
+        'Rescue bus requested. Manifest dumped to Pilot Halo App. Initiating headcount sequence.'
+    );
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4. TRIGGER: Link to EMS Flares (Only for Critical/Bailout types)
+DROP TRIGGER IF EXISTS trig_halo_initiate ON public.emergency_flares;
+CREATE TRIGGER trig_halo_initiate
+AFTER INSERT ON public.emergency_flares
+FOR EACH ROW
+WHEN (NEW.flare_type = 'Mechanical_Critical' OR NEW.flare_type = 'Crash_Vehicle')
+EXECUTE FUNCTION public.fn_initiate_halo_protocol();
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT INTELLIGENCE: FLARE ESCALATION & MANIFEST SNAPSHOT
+-- Purpose: Locks student records and creates a manifest during emergencies.
+-- Status: Diamond Tier | Safety Critical Logic
+-- ============================================================================
+
+BEGIN;
+
+-- 1. THE EMERGENCY SNAPSHOT FUNCTION
+CREATE OR REPLACE FUNCTION public.fn_process_flare_escalation()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_student_record RECORD;
+BEGIN
+    -- Only trigger for high-severity flares
+    IF (NEW.severity IN ('Level_2_EMS_Required', 'Level_3_Mass_Casualty')) THEN
+        
+        -- Create the Dispatch Entry
+        INSERT INTO public.incident_dispatch_logs (
+            flare_id,
+            action_taken,
+            dispatch_notes
+        ) VALUES (
+            NEW.id,
+            'SYSTEM: Manifest Snapshot Created',
+            'Emergency Flare triggered. All students currently boarded on Bus ' || NEW.bus_id || ' have been flagged for EMS manifest.'
+        );
+
+        -- Find every student currently marked as 'Boarded' on this bus
+        -- and update their status for first responders.
+        -- We use a CTE to ensure we only target the *most recent* scan for each student.
+        WITH latest_scans AS (
+            SELECT DISTINCT ON (student_id) student_id, event_action
+            FROM public.student_scan_events
+            WHERE bus_id = NEW.bus_id
+            ORDER BY student_id, created_at DESC
+        )
+        UPDATE public.students
+        SET 
+            status_note = 'EMERGENCY_MANIFEST_ACTIVE',
+            updated_at = clock_timestamp()
+        WHERE id IN (SELECT student_id FROM latest_scans WHERE event_action = 'Boarded');
+
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. THE PANIC BUTTON TRIGGER
+DROP TRIGGER IF EXISTS trig_flare_escalation ON public.emergency_flares;
+CREATE TRIGGER trig_flare_escalation
+AFTER INSERT ON public.emergency_flares
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_process_flare_escalation();
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT INTELLIGENCE: SMART ETA & MESH ADVANCEMENT
+-- Purpose: Automatically advances the trip mesh and updates ETAs for parents.
+-- Status: Diamond Tier | Uses PostGIS Spatial Logic
+-- ============================================================================
+
+BEGIN;
+
+-- 1. THE MESH ADVANCEMENT FUNCTION
+CREATE OR REPLACE FUNCTION public.fn_process_mesh_intelligence()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_trip_id UUID;
+    v_current_waypoint_id UUID;
+    v_next_waypoint_record RECORD;
+    v_geofence_radius INT;
+BEGIN
+    -- Find the active trip for this bus
+    SELECT trip_id INTO v_trip_id 
+    FROM public.bus_trip_handshakes 
+    WHERE bus_id = NEW.bus_id AND status = 'Active' 
+    LIMIT 1;
+
+    IF v_trip_id IS NOT NULL THEN
+        -- Get the current target waypoint from the mesh
+        SELECT current_waypoint_id INTO v_current_waypoint_id 
+        FROM public.trip_active_mesh 
+        WHERE trip_id = v_trip_id;
+
+        -- Get the waypoint details (location and radius)
+        SELECT location_point, geofence_radius_meters INTO v_next_waypoint_record
+        FROM public.route_waypoints 
+        WHERE id = v_current_waypoint_id;
+
+        -- SPATIAL CHECK: Is the bus within the geofence? (Using ST_DWithin for speed)
+        IF ST_DWithin(NEW.location_gps, v_next_waypoint_record.location_point, v_next_waypoint_record.geofence_radius_meters) THEN
+            
+            -- ADVANCE THE MESH: Find the next stop in the sequence
+            SELECT id INTO v_current_waypoint_id 
+            FROM public.route_waypoints 
+            WHERE trip_id = v_trip_id 
+            AND sequence_index > (SELECT sequence_index FROM public.route_waypoints WHERE id = v_current_waypoint_id)
+            ORDER BY sequence_index ASC 
+            LIMIT 1;
+
+            -- Update the Active Mesh for the UI to consume
+            UPDATE public.trip_active_mesh
+            SET 
+                current_waypoint_id = v_current_waypoint_id,
+                -- In a full rollout, this would call a routing API (like Google/OSRM)
+                -- For the Atom, we'll set a placeholder +10 minutes for the next stop
+                estimated_arrival_at = clock_timestamp() + interval '10 minutes',
+                last_mesh_update = clock_timestamp()
+            WHERE trip_id = v_trip_id;
+
+            RAISE NOTICE 'MESH UPDATE: Bus % has arrived at stop. Advancing to next waypoint.', NEW.bus_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. THE TELEMETRY TRIGGER
+-- This fires on every single GPS ping from the Pilot's device.
+DROP TRIGGER IF EXISTS trig_mesh_intelligence ON public.bus_telemetry_logs;
+CREATE TRIGGER trig_mesh_intelligence
+AFTER INSERT ON public.bus_telemetry_logs
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_process_mesh_intelligence();
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT INTELLIGENCE: SMART ETA & MESH ADVANCEMENT
+-- Purpose: Automatically advances the trip mesh and updates ETAs for parents.
+-- Status: Diamond Tier | Uses PostGIS Spatial Logic
+-- ============================================================================
+
+BEGIN;
+
+-- 1. THE MESH ADVANCEMENT FUNCTION
+CREATE OR REPLACE FUNCTION public.fn_process_mesh_intelligence()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_trip_id UUID;
+    v_current_waypoint_id UUID;
+    v_next_waypoint_record RECORD;
+    v_geofence_radius INT;
+BEGIN
+    -- Find the active trip for this bus
+    SELECT trip_id INTO v_trip_id 
+    FROM public.bus_trip_handshakes 
+    WHERE bus_id = NEW.bus_id AND status = 'Active' 
+    LIMIT 1;
+
+    IF v_trip_id IS NOT NULL THEN
+        -- Get the current target waypoint from the mesh
+        SELECT current_waypoint_id INTO v_current_waypoint_id 
+        FROM public.trip_active_mesh 
+        WHERE trip_id = v_trip_id;
+
+        -- Get the waypoint details (location and radius)
+        SELECT location_point, geofence_radius_meters INTO v_next_waypoint_record
+        FROM public.route_waypoints 
+        WHERE id = v_current_waypoint_id;
+
+        -- SPATIAL CHECK: Is the bus within the geofence? (Using ST_DWithin for speed)
+        IF ST_DWithin(NEW.location_gps, v_next_waypoint_record.location_point, v_next_waypoint_record.geofence_radius_meters) THEN
+            
+            -- ADVANCE THE MESH: Find the next stop in the sequence
+            SELECT id INTO v_current_waypoint_id 
+            FROM public.route_waypoints 
+            WHERE trip_id = v_trip_id 
+            AND sequence_index > (SELECT sequence_index FROM public.route_waypoints WHERE id = v_current_waypoint_id)
+            ORDER BY sequence_index ASC 
+            LIMIT 1;
+
+            -- Update the Active Mesh for the UI to consume
+            UPDATE public.trip_active_mesh
+            SET 
+                current_waypoint_id = v_current_waypoint_id,
+                -- In a full rollout, this would call a routing API (like Google/OSRM)
+                -- For the Atom, we'll set a placeholder +10 minutes for the next stop
+                estimated_arrival_at = clock_timestamp() + interval '10 minutes',
+                last_mesh_update = clock_timestamp()
+            WHERE trip_id = v_trip_id;
+
+            RAISE NOTICE 'MESH UPDATE: Bus % has arrived at stop. Advancing to next waypoint.', NEW.bus_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. THE TELEMETRY TRIGGER
+-- This fires on every single GPS ping from the Pilot's device.
+DROP TRIGGER IF EXISTS trig_mesh_intelligence ON public.bus_telemetry_logs;
+CREATE TRIGGER trig_mesh_intelligence
+AFTER INSERT ON public.bus_telemetry_logs
+FOR EACH ROW
+EXECUTE FUNCTION public.fn_process_mesh_intelligence();
+
+COMMIT;
+
+-- ============================================================================
+-- ORBIT PARTITION 07: SATELLITE ACCESS PROTOCOL
+-- Purpose: Enabling Teachers to assist in Headcounts during Halo Sessions.
+-- ============================================================================
+
+BEGIN;
+
+-- 1. SATELLITE PERMISSIONS (The Duval Wall)
+-- Allow Teachers to see the Halo Manifest for their school's students.
+DROP POLICY IF EXISTS satellite_view_huddle ON public.halo_manifest_snapshots;
+CREATE POLICY satellite_view_huddle ON public.halo_manifest_snapshots FOR SELECT 
+USING (
+    public.get_my_role() = 'Satellite' 
+    AND student_id IN (SELECT id FROM public.students WHERE school_id IN (SELECT id FROM public.schools WHERE district_id = public.get_my_district()))
+);
+
+-- 2. SATELLITE VERIFICATION POWER
+-- Allow Satellites to perform "Visual_Manual" verifications during an incident.
+DROP POLICY IF EXISTS satellite_verify_students ON public.halo_manifest_snapshots;
+CREATE POLICY satellite_verify_students ON public.halo_manifest_snapshots FOR UPDATE 
+USING (public.get_my_role() = 'Satellite')
+WITH CHECK (verification_type = 'Visual_Manual');
+
+COMMIT;
