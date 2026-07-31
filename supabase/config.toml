@@ -1,0 +1,18 @@
+# Supabase local config — project_id is set by: supabase link --project-ref <ref>
+# Docs: https://supabase.com/docs/guides/cli/config
+
+project_id = "YOUR_PROJECT_REF"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "archive"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[db.migrations]
+# Phase SQL lives in orbit-phase1/2/3; optional copies go in ./migrations/

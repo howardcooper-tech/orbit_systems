@@ -1,0 +1,706 @@
+Orbit Phase 1
+Combined scripts
+
+-- ORBIT PHASE 1 — 01: Extensions
+-- Run first. Requires Supabase default auth schema.
+
+BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 02: District infrastructure & identity
+
+BEGIN;
+
+CREATE TABLE public.districts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL,
+    state_code TEXT NOT NULL DEFAULT 'FL',
+    compliance_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE public.contractors (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
+    company_name TEXT NOT NULL,
+    carrier_code TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT carrier_code_district_unique UNIQUE (carrier_code, district_id)
+);
+
+CREATE TABLE public.schools (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
+    school_name TEXT NOT NULL,
+    school_code TEXT NOT NULL,
+    location_point GEOGRAPHY(POINT, 4326),
+    geofence_center GEOGRAPHY(POINT, 4326),
+    geofence_radius_meters INT NOT NULL DEFAULT 200,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT school_code_district_unique UNIQUE (school_code, district_id)
+);
+
+CREATE TABLE public.staff_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    district_id UUID REFERENCES public.districts(id) ON DELETE SET NULL,
+    contractor_id UUID REFERENCES public.contractors(id) ON DELETE SET NULL,
+    school_id UUID REFERENCES public.schools(id) ON DELETE SET NULL,
+    first_name TEXT,
+    last_name TEXT,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN (
+        'Superintendent', 'Principal', 'Command', 'Central',
+        'Pilot', 'Halo', 'Crew', 'Drone',
+        'Teacher', 'Satellite', 'Staff_Teacher', 'Sub_Teacher', 'Lead_Satellite', 'Node',
+        'Global_Dispatcher'
+    )),
+    roles TEXT[] NOT NULL DEFAULT '{}',
+    preferred_language TEXT NOT NULL DEFAULT 'en' CHECK (char_length(preferred_language) = 2),
+    profile_photo_url TEXT,
+    pin_code TEXT,
+    hire_date DATE NOT NULL DEFAULT CURRENT_DATE CHECK (hire_date <= CURRENT_DATE),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    is_on_duty BOOLEAN NOT NULL DEFAULT false,
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT pilot_contractor_bond CHECK (
+        (role = 'Pilot' AND contractor_id IS NOT NULL) OR (role <> 'Pilot')
+    ),
+    CONSTRAINT teacher_school_bond CHECK (
+        (role IN ('Teacher', 'Satellite', 'Staff_Teacher', 'Sub_Teacher', 'Lead_Satellite') AND school_id IS NOT NULL)
+        OR (role NOT IN ('Teacher', 'Satellite', 'Staff_Teacher', 'Sub_Teacher', 'Lead_Satellite'))
+    )
+);
+
+CREATE TABLE public.parents (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    is_verified_node BOOLEAN NOT NULL DEFAULT false,
+    verification_source TEXT NOT NULL DEFAULT 'District_Direct',
+    verified_at TIMESTAMPTZ,
+    profile_photo_url TEXT,
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Extended guardian profile (Trust / Node apps); links to auth.users
+CREATE TABLE public.guardian_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    first_name TEXT,
+    last_name TEXT,
+    preferred_language TEXT NOT NULL DEFAULT 'en' CHECK (char_length(preferred_language) = 2),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 03: SIS macro layer + BLE micro layer
+
+BEGIN;
+
+-- MACRO (SIS): enrollment, legal identity, medical flags from district feed
+CREATE TABLE public.student_sis_enrollment (
+    sis_student_id TEXT PRIMARY KEY,
+    school_id UUID NOT NULL REFERENCES public.schools(id) ON DELETE RESTRICT,
+    enrollment_status TEXT NOT NULL DEFAULT 'active' CHECK (
+        enrollment_status IN ('active', 'graduated', 'withdrawn', 'transferred', 'suspended')
+    ),
+    full_name TEXT NOT NULL,
+    date_of_birth DATE,
+    medical_alert_flag BOOLEAN NOT NULL DEFAULT false,
+    medical_notes TEXT,
+    pin_hash TEXT,
+    pin_updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- MICRO (BLE / operations): presence on bus, scans, flares — no enrollment_status here
+CREATE TABLE public.students (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sis_student_id TEXT NOT NULL UNIQUE REFERENCES public.student_sis_enrollment(sis_student_id) ON DELETE RESTRICT,
+    school_id UUID NOT NULL REFERENCES public.schools(id) ON DELETE RESTRICT,
+    assigned_stop_point GEOGRAPHY(POINT, 4326),
+    current_status TEXT NOT NULL DEFAULT 'off_bus' CHECK (
+        current_status IN ('off_bus', 'boarded', 'missing', 'medical_hold')
+    ),
+    missing_status TEXT NOT NULL DEFAULT 'NONE' CHECK (
+        missing_status IN ('NONE', 'PENDING_MANUAL', 'SUSPENDED', 'FLARE_ACTIVE')
+    ),
+    status_note TEXT,
+    last_known_gps GEOGRAPHY(POINT, 4326),
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE public.student_guardians (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE RESTRICT,
+    parent_id UUID NOT NULL REFERENCES public.parents(id) ON DELETE CASCADE,
+    relationship TEXT NOT NULL DEFAULT 'Guardian',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (student_id, parent_id)
+);
+
+CREATE TABLE public.student_device_authorizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    parent_id UUID NOT NULL REFERENCES public.parents(id) ON DELETE CASCADE,
+    device_token TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (student_id, parent_id, device_token)
+);
+
+COMMENT ON TABLE public.student_sis_enrollment IS 'SIS macro layer: enrollment and district master record.';
+COMMENT ON TABLE public.students IS 'BLE/ops micro layer: live bus presence only; join via sis_student_id.';
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 04: Fleet & telemetry (INSERT-only table structure; enforcement in Phase 3)
+
+BEGIN;
+
+CREATE TABLE public.buses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE SET NULL,
+    contractor_id UUID NOT NULL REFERENCES public.contractors(id) ON DELETE CASCADE,
+    school_id UUID REFERENCES public.schools(id) ON DELETE SET NULL,
+    assigned_pilot_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    bus_number TEXT NOT NULL,
+    vin TEXT UNIQUE,
+    license_plate TEXT UNIQUE,
+    current_location GEOGRAPHY(POINT, 4326),
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (
+        status IN ('Active', 'Bay_Maintenance', 'Grounded', 'Waiting_On_Parts', 'Decommissioned')
+    ),
+    motion_status TEXT NOT NULL DEFAULT 'Stopped' CHECK (
+        motion_status IN ('Moving', 'Idle', 'Stopped', 'Offline')
+    ),
+    is_equipped_with_moca BOOLEAN NOT NULL DEFAULT true,
+    is_on_campus BOOLEAN NOT NULL DEFAULT true,
+    is_remote_locked BOOLEAN NOT NULL DEFAULT false,
+    is_grounded BOOLEAN NOT NULL DEFAULT false,
+    current_route_id UUID,
+    next_route_id UUID,
+    last_stop_id UUID,
+    route_status TEXT NOT NULL DEFAULT 'Idle' CHECK (
+        route_status IN ('Idle', 'En_Route', 'Arriving', 'At_Stop', 'Completed')
+    ),
+    last_ping TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT bus_number_contractor_unique UNIQUE (bus_number, contractor_id)
+);
+
+ALTER TABLE public.students
+    ADD COLUMN current_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL;
+
+CREATE TABLE public.bus_telemetry_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID NOT NULL REFERENCES public.buses(id) ON DELETE CASCADE,
+    location GEOGRAPHY(POINT, 4326) NOT NULL,
+    speed_mph INT NOT NULL DEFAULT 0 CHECK (speed_mph >= 0 AND speed_mph < 120),
+    device_timestamp TIMESTAMPTZ,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMENT ON TABLE public.bus_telemetry_logs IS 'Append-only GPS history. Phase 3 adds INSERT-only trigger.';
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 05: Trips, manifest (audit-protected), handshakes, audit log table
+
+BEGIN;
+
+CREATE TABLE public.trips (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
+    school_id UUID REFERENCES public.schools(id) ON DELETE SET NULL,
+    trip_code TEXT NOT NULL,
+    trip_type TEXT NOT NULL DEFAULT 'Daily' CHECK (
+        trip_type IN ('Daily', 'Field_Trip', 'Special_Needs', 'Athletics')
+    ),
+    destination TEXT NOT NULL,
+    lead_satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending_bus_assignment' CHECK (
+        status IN ('pending_bus_assignment', 'ready_for_boarding', 'in_progress', 'completed', 'canceled')
+    ),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT trip_code_district_unique UNIQUE (trip_code, district_id)
+);
+
+CREATE TABLE public.trip_manifest (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE RESTRICT,
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE RESTRICT,
+    assigned_group_id UUID,
+    expected_status TEXT NOT NULL DEFAULT 'EXPECTED' CHECK (
+        expected_status IN ('EXPECTED', 'BOARDED', 'ABSENT', 'EXCUSED', 'EXCUSED_CHECKOUT')
+    ),
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (trip_id, student_id)
+);
+
+CREATE TABLE public.bus_trip_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    bus_id UUID NOT NULL REFERENCES public.buses(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'PENDING_PILOT_ACCEPT' CHECK (
+        status IN ('PENDING_PILOT_ACCEPT', 'OPEN_FOR_BOARDING', 'LOCKED_DEPARTED')
+    ),
+    handshake_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (trip_id, bus_id)
+);
+
+-- Forensic store (triggers attached in Phase 3)
+CREATE TABLE public.audit_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    action_type TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    record_id UUID,
+    old_data JSONB,
+    new_data JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMENT ON TABLE public.trip_manifest IS 'Audit-protected: trip_id ON DELETE RESTRICT prevents silent manifest loss.';
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 06: Bay operations & communications
+
+BEGIN;
+
+CREATE TABLE public.bus_inspections (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID NOT NULL REFERENCES public.buses(id) ON DELETE CASCADE,
+    inspector_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    inspection_type TEXT NOT NULL CHECK (
+        inspection_type IN ('Pre_Trip', 'Post_Trip', 'Bay_Review', 'DOT_Audit')
+    ),
+    inspection_status TEXT NOT NULL CHECK (
+        inspection_status IN ('Passed', 'Failed', 'Critical', 'Safety_Pull', 'In_Progress', 'Flagged_Minor', 'Grounded')
+    ),
+    mileage INT,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.maintenance_work_orders (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bus_id UUID NOT NULL REFERENCES public.buses(id) ON DELETE CASCADE,
+    reported_by_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    assigned_crew_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    issue_description TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'Standard' CHECK (
+        priority IN ('Low', 'Standard', 'Urgent', 'Critical_Grounded')
+    ),
+    status TEXT NOT NULL DEFAULT 'Open' CHECK (
+        status IN ('Open', 'In_Progress', 'Awaiting_Parts', 'Resolved')
+    ),
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.comms_channels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
+    trip_id UUID REFERENCES public.trips(id) ON DELETE CASCADE,
+    channel_name TEXT NOT NULL,
+    channel_type TEXT NOT NULL CHECK (
+        channel_type IN ('Trip_Radio', 'Parent_Broadcast', 'Command_Direct', 'Emergency_Flare')
+    ),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.comms_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    channel_id UUID NOT NULL REFERENCES public.comms_channels(id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    recipient_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    message_body TEXT NOT NULL,
+    priority_flag BOOLEAN NOT NULL DEFAULT false,
+    read_by_uuids UUID[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 07: Trip mesh & IoT scan events
+
+BEGIN;
+
+CREATE TABLE public.route_waypoints (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    sequence_index INT NOT NULL,
+    stop_name TEXT NOT NULL,
+    location_point GEOGRAPHY(POINT, 4326) NOT NULL,
+    geofence_radius_meters INT NOT NULL DEFAULT 50,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (trip_id, sequence_index)
+);
+
+CREATE TABLE public.trip_active_mesh (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE UNIQUE,
+    current_waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    next_waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    estimated_arrival_at TIMESTAMPTZ,
+    last_mesh_update TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.student_scan_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    bus_id UUID NOT NULL REFERENCES public.buses(id) ON DELETE CASCADE,
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    waypoint_id UUID REFERENCES public.route_waypoints(id) ON DELETE SET NULL,
+    scan_type TEXT NOT NULL CHECK (
+        scan_type IN ('BLE_Passive', 'RFID_Tap', 'NFC_Tap', 'Manual_Pilot', 'Manual_Teacher')
+    ),
+    event_action TEXT NOT NULL CHECK (
+        event_action IN ('Boarded', 'Exited', 'Premature_Exit', 'Transfer', 'Halo_Verified', 'Zone_Detection')
+    ),
+    ble_zone INT NOT NULL DEFAULT 1 CHECK (ble_zone IN (1, 2)),
+    location_at_scan GEOGRAPHY(POINT, 4326) NOT NULL,
+    is_tap_recovery BOOLEAN NOT NULL DEFAULT false,
+    device_timestamp TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 08: Emergency flares & dispatch
+
+BEGIN;
+
+CREATE TABLE public.emergency_flares (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
+    triggered_by_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    bus_id UUID REFERENCES public.buses(id) ON DELETE CASCADE,
+    student_id UUID REFERENCES public.students(id) ON DELETE SET NULL,
+    flare_type TEXT NOT NULL CHECK (
+        flare_type IN (
+            'Medical_Student', 'Medical_Staff', 'Crash_Vehicle', 'Hostile_Interference',
+            'Mechanical_Critical', 'No_Student_Flag', 'Wrong_Bus_Flag', 'Student_Still_Onboard'
+        )
+    ),
+    severity TEXT NOT NULL DEFAULT 'Level_1' CHECK (
+        severity IN ('Level_1', 'Level_2_EMS_Required', 'Level_3_Mass_Casualty', 'High', 'Critical')
+    ),
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (
+        status IN ('Active', 'EMS_En_Route', 'EMS_On_Scene', 'Secured_Closed', 'False_Alarm', 'Pending')
+    ),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    initial_location GEOGRAPHY(POINT, 4326) NOT NULL,
+    search_timer_started_at TIMESTAMPTZ,
+    search_timer_suspended_at TIMESTAMPTZ,
+    search_verified_by_satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    search_timer_status TEXT NOT NULL DEFAULT 'Not_Applicable' CHECK (
+        search_timer_status IN (
+            'Not_Applicable', '15m_Active', '10m_Backup_Active', 'Resolved_Verified', 'Escalated_Failed'
+        )
+    ),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.incident_dispatch_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    flare_id UUID REFERENCES public.emergency_flares(id) ON DELETE CASCADE,
+    command_officer_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    action_taken TEXT NOT NULL,
+    agency_contacted TEXT CHECK (
+        agency_contacted IN ('None', '911_Police', '911_Fire_EMS', 'District_Superintendent', 'DOT_Emergency')
+    ),
+    dispatch_notes TEXT,
+    action_timestamp TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMIT;
+-- ORBIT PHASE 1 — 09: Standing routes, field trips, chaperones
+
+BEGIN;
+
+CREATE TABLE public.routes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    route_name TEXT NOT NULL,
+    school_id UUID REFERENCES public.schools(id) ON DELETE SET NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.route_stops (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    route_id UUID NOT NULL REFERENCES public.routes(id) ON DELETE CASCADE,
+    stop_name TEXT NOT NULL,
+    sequence_order INT NOT NULL,
+    geofence_center GEOGRAPHY(POINT, 4326),
+    geofence_radius_meters INT NOT NULL DEFAULT 50,
+    estimated_arrival_time TIME,
+    UNIQUE (route_id, sequence_order)
+);
+
+ALTER TABLE public.buses
+    ADD CONSTRAINT buses_current_route_id_fkey
+        FOREIGN KEY (current_route_id) REFERENCES public.routes(id) ON DELETE SET NULL,
+    ADD CONSTRAINT buses_next_route_id_fkey
+        FOREIGN KEY (next_route_id) REFERENCES public.routes(id) ON DELETE SET NULL,
+    ADD CONSTRAINT buses_last_stop_id_fkey
+        FOREIGN KEY (last_stop_id) REFERENCES public.route_stops(id) ON DELETE SET NULL;
+
+CREATE TABLE public.field_trip_venues (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    venue_name TEXT NOT NULL,
+    macro_geofence_polygon GEOGRAPHY(POLYGON, 4326),
+    parking_area_polygon GEOGRAPHY(POLYGON, 4326),
+    emergency_buffer_meters INT NOT NULL DEFAULT 100,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+ALTER TABLE public.trips
+    ADD COLUMN venue_id UUID REFERENCES public.field_trip_venues(id) ON DELETE SET NULL;
+
+CREATE TABLE public.trip_chaperone_groups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE RESTRICT,
+    node_id UUID REFERENCES public.guardian_profiles(id) ON DELETE SET NULL,
+    satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    outbound_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    return_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+ALTER TABLE public.trip_manifest
+    ADD CONSTRAINT trip_manifest_assigned_group_id_fkey
+        FOREIGN KEY (assigned_group_id) REFERENCES public.trip_chaperone_groups(id) ON DELETE SET NULL;
+
+CREATE TABLE public.field_trip_checkouts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    requesting_parent_node_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    approving_satellite_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Approved', 'Denied')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE TABLE public.trip_chaperone_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    guardian_id UUID NOT NULL REFERENCES public.guardian_profiles(id) ON DELETE CASCADE,
+    requested_satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    assigned_satellite_id UUID REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+    handshake_status TEXT NOT NULL DEFAULT 'Pending' CHECK (handshake_status IN ('Pending', 'Approved', 'Rejected')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE TABLE public.custody_waiver_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE RESTRICT,
+    guardian_id UUID NOT NULL REFERENCES public.guardian_profiles(id) ON DELETE RESTRICT,
+    waiver_text TEXT NOT NULL,
+    typed_signature TEXT NOT NULL,
+    ip_address TEXT,
+    device_user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.secondary_authorized_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    phone_number TEXT,
+    avatar_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.student_secondary_authorizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    secondary_id UUID NOT NULL REFERENCES public.secondary_authorized_profiles(id) ON DELETE CASCADE,
+    authorized_by_parent_id UUID NOT NULL REFERENCES public.guardian_profiles(id) ON DELETE CASCADE,
+    relationship_label TEXT NOT NULL,
+    morning_track_allowed BOOLEAN NOT NULL DEFAULT true,
+    afternoon_track_allowed BOOLEAN NOT NULL DEFAULT true,
+    chaperone_approved_status BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (student_id, secondary_id)
+);
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 10: Halo evacuation, alerts, rescue, hardware
+
+BEGIN;
+
+CREATE TABLE public.halo_sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    flare_id UUID REFERENCES public.emergency_flares(id) ON DELETE CASCADE,
+    bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    pilot_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    rescue_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    hardware_id UUID,
+    abandoned_bus_location GEOGRAPHY(POINT, 4326) NOT NULL,
+    current_huddle_location GEOGRAPHY(POINT, 4326),
+    expected_count INT NOT NULL,
+    verified_count INT NOT NULL DEFAULT 0,
+    bailout_status TEXT NOT NULL DEFAULT 'Evacuating' CHECK (
+        bailout_status IN ('Evacuating', 'Huddled', 'Transferring', 'Rescued_Complete')
+    ),
+    ems_action_packet JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.halo_manifest_snapshots (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    halo_session_id UUID NOT NULL REFERENCES public.halo_sessions(id) ON DELETE CASCADE,
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE RESTRICT,
+    verification_type TEXT CHECK (verification_type IN ('Tap', 'PIN', 'Visual_Manual')),
+    is_verified BOOLEAN NOT NULL DEFAULT false,
+    verified_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'Unverified',
+    current_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    trip_id UUID REFERENCES public.trips(id) ON DELETE SET NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    verified_at TIMESTAMPTZ
+);
+
+CREATE TABLE public.rescue_handshakes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    halo_session_id UUID NOT NULL REFERENCES public.halo_sessions(id) ON DELETE CASCADE,
+    source_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    rescue_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'Dispatched' CHECK (
+        status IN ('Dispatched', 'In_Proximity', 'Requested', 'Accepted', 'Completed', 'Aborted')
+    ),
+    handshake_type TEXT CHECK (handshake_type IN ('Bus_to_Bus', 'Halo_to_Bus')),
+    initiated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE TABLE public.outbound_alerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    recipient_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    alert_type TEXT NOT NULL CHECK (
+        alert_type IN ('Routine_Tap', 'ETA_Warning', 'Emergency_Halo', 'Rescue_Update', 'Drone_Dispatch', 'System_Log')
+    ),
+    priority TEXT NOT NULL DEFAULT 'Normal' CHECK (priority IN ('Normal', 'High', 'Critical', 'Medium')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    transcript TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_audio_override BOOLEAN NOT NULL DEFAULT false,
+    is_sent BOOLEAN NOT NULL DEFAULT false,
+    sent_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE public.drone_assets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    district_id UUID REFERENCES public.districts(id) ON DELETE SET NULL,
+    drone_callsign TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'Docked' CHECK (
+        status IN ('Docked', 'Patrol', 'Deploying', 'On_Scene', 'Returning', 'Maintenance')
+    ),
+    current_location GEOGRAPHY(POINT, 4326),
+    battery_level INT NOT NULL DEFAULT 100 CHECK (battery_level BETWEEN 0 AND 100)
+);
+
+CREATE TABLE public.trusted_hardware (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    device_fingerprint TEXT NOT NULL UNIQUE,
+    assigned_bus_id UUID REFERENCES public.buses(id) ON DELETE SET NULL,
+    device_type TEXT CHECK (device_type IN ('Pilot_Tablet', 'Bay_Tablet', 'Node_Phone', 'Driver_BYOD')),
+    last_sync_at TIMESTAMPTZ,
+    is_active BOOLEAN NOT NULL DEFAULT true
+);
+
+ALTER TABLE public.halo_sessions
+    ADD CONSTRAINT halo_sessions_hardware_id_fkey
+        FOREIGN KEY (hardware_id) REFERENCES public.trusted_hardware(id) ON DELETE SET NULL;
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 11: Cold storage schema (no jobs; Phase 3 adds archive functions)
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS archive;
+
+CREATE TABLE archive.bus_telemetry_logs (LIKE public.bus_telemetry_logs INCLUDING ALL);
+CREATE TABLE archive.audit_logs (LIKE public.audit_logs INCLUDING ALL);
+CREATE TABLE archive.halo_manifest_snapshots (LIKE public.halo_manifest_snapshots INCLUDING ALL);
+CREATE TABLE archive.comms_messages (LIKE public.comms_messages INCLUDING ALL);
+CREATE TABLE archive.field_trip_checkouts (LIKE public.field_trip_checkouts INCLUDING ALL);
+
+COMMIT;
+
+-- ORBIT PHASE 1 — 12: Performance indexes
+
+BEGIN;
+
+CREATE INDEX idx_students_sis ON public.students (sis_student_id);
+CREATE INDEX idx_students_school ON public.students (school_id);
+CREATE INDEX idx_students_emergency_flare ON public.students (id, school_id) WHERE missing_status <> 'NONE';
+CREATE INDEX idx_sis_enrollment_school ON public.student_sis_enrollment (school_id, enrollment_status);
+
+CREATE INDEX idx_telemetry_bus_recorded ON public.bus_telemetry_logs (bus_id, recorded_at DESC);
+CREATE INDEX idx_buses_district ON public.buses (district_id);
+CREATE INDEX idx_buses_active_motion ON public.buses (id, bus_number) WHERE status = 'Active' AND motion_status = 'Moving';
+
+CREATE INDEX idx_manifest_lookup ON public.trip_manifest (trip_id, student_id, expected_status);
+CREATE INDEX idx_trip_handshakes_bus ON public.bus_trip_handshakes (bus_id, status);
+
+CREATE INDEX idx_audit_record_search ON public.audit_logs (record_id, created_at DESC);
+CREATE INDEX idx_audit_user_search ON public.audit_logs (user_id, action_type);
+CREATE INDEX idx_audit_new_data_gin ON public.audit_logs USING GIN (new_data);
+
+CREATE INDEX idx_scan_student_created ON public.student_scan_events (student_id, created_at DESC);
+CREATE INDEX idx_scan_bus_created ON public.student_scan_events (bus_id, created_at DESC);
+
+CREATE INDEX idx_flares_district_created ON public.emergency_flares (district_id, created_at DESC);
+CREATE INDEX idx_outbound_recipient ON public.outbound_alerts (recipient_id, created_at DESC);
+
+CREATE INDEX idx_trip_chaperones_trip ON public.trip_chaperone_groups (trip_id);
+CREATE INDEX idx_trip_checkouts_trip ON public.field_trip_checkouts (trip_id);
+CREATE INDEX idx_halo_manifest_session ON public.halo_manifest_snapshots (halo_session_id);
+CREATE INDEX idx_trusted_hardware_bus ON public.trusted_hardware (assigned_bus_id);
+
+COMMIT;
+
