@@ -41,7 +41,8 @@
         { "file": "04_audit_triggers.sql" },
         { "file": "05_telemetry_immutable.sql" },
         { "file": "06_updated_at_triggers.sql" },
-        { "file": "07_business_gates.sql" }
+        { "file": "07_business_gates.sql" },
+        { "file": "08_phase_3c_duval_wall.sql" }
       ]
     }
   }
