@@ -16,3 +16,9 @@ major_version = 15
 
 [db.migrations]
 # Phase SQL lives in orbit-phase1/2/3; optional copies go in ./migrations/
+
+# Hosted: Dashboard → Authentication → Hooks still required (see docs/AUTH_TENANT_HOOK_DEPLOY.md).
+# Function created by supabase/migrations/20260814000000_phase_3e_auth_tenant_jwt_hook.sql
+[auth.hook.custom_access_token]
+enabled = true
+uri = "pg-functions://postgres/public/custom_access_token_hook"

@@ -4,7 +4,8 @@
  * Clients: anon key + user JWT. Never service_role.
  *
  * Required JWT claim: tenant_id = districts.id
- * (Custom Access Token Hook or raw_app_meta_data surfaced as tenant_id).
+ * Issued by public.custom_access_token_hook (Phase 3e).
+ * Duval Wall reads auth.jwt() ->> 'tenant_id' via jwt_tenant_id().
  */
 
 export const ORBIT_RPC = {

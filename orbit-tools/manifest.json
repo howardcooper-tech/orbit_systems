@@ -43,7 +43,8 @@
         { "file": "06_updated_at_triggers.sql" },
         { "file": "07_business_gates.sql" },
         { "file": "08_phase_3c_duval_wall.sql" },
-        { "file": "09_transit_mode.sql" }
+        { "file": "09_transit_mode.sql" },
+        { "file": "10_auth_tenant_jwt_hook.sql" }
       ]
     }
   }
