@@ -1,7 +1,8 @@
-# Supabase local config — project_id is set by: supabase link --project-ref <ref>
+# Supabase local CLI target — STAGING only.
+# Production must not be linked from this file.
 # Docs: https://supabase.com/docs/guides/cli/config
 
-project_id = "YOUR_PROJECT_REF"
+project_id = "ydlwukjzqtssbzirnefs"
 
 [api]
 enabled = true
