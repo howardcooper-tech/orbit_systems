@@ -1,0 +1,12 @@
+{
+  "name": "@orbit/pilot-offline-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "description": "Pilot tablet offline-first outbox: BLE pings and offboard events queue locally, then replay to Supabase with staggered exponential backoff.",
+  "peerDependencies": {
+    "@supabase/supabase-js": "^2.30.0"
+  }
+}
