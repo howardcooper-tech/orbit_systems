@@ -53,8 +53,16 @@ function Get-OrbitManifest {
 
 function Test-StepIncluded {
     param($Step)
-    if (-not $Step.optional) { return $true }
-    if ($Step.destructive -and $IncludeSweep) { return $true }
+    $isOptional = $false
+    $isDestructive = $false
+    if ($null -ne $Step.PSObject.Properties['optional']) {
+        $isOptional = [bool]$Step.optional
+    }
+    if ($null -ne $Step.PSObject.Properties['destructive']) {
+        $isDestructive = [bool]$Step.destructive
+    }
+    if (-not $isOptional) { return $true }
+    if ($isDestructive -and $IncludeSweep) { return $true }
     if ($Step.file -eq '03_dev_seed_optional.sql' -and $IncludeDevSeed) { return $true }
     if ($Step.file -eq '01_preflight_checks.sql' -and $IncludePreflight) { return $true }
     if ($Step.file -eq 'PHASE1_VERIFY.sql' -and $IncludeVerify) { return $true }
@@ -131,20 +139,20 @@ $ran = 0
 $skipped = 0
 
 foreach ($key in $phaseKeys) {
-    $phase = $manifest.phases.$key
-    if (-not $phase) { throw "Unknown phase key in manifest: $key" }
+    $phaseDefinition = $manifest.phases.$key
+    if (-not $phaseDefinition) { throw "Unknown phase key in manifest: $key" }
 
     Write-Host ""
-    Write-Host "######## Phase $key — $($phase.label) ########" -ForegroundColor Green
+    Write-Host "######## Phase $key — $($phaseDefinition.label) ########" -ForegroundColor Green
 
-    foreach ($step in $phase.steps) {
+    foreach ($step in $phaseDefinition.steps) {
         if (-not (Test-StepIncluded -Step $step)) {
             $skipped++
             Write-Host "    [skip optional] $($step.file)" -ForegroundColor DarkYellow
             continue
         }
 
-        $dir = Join-Path $DocumentsRoot $phase.dir
+        $dir = Join-Path $DocumentsRoot $phaseDefinition.dir
         $fullPath = Join-Path $dir $step.file
         $label = "Phase $key / $($step.file)"
         Invoke-OrbitSqlFile -FullPath $fullPath -Label $label
