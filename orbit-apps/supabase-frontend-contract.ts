@@ -16,7 +16,9 @@ export const ORBIT_RPC = {
   canActivateTransitMode: "can_activate_transit_mode",
   canAssistTransitMode: "can_assist_transit_mode",
   jwtTenantId: "jwt_tenant_id",
-  /** Not created yet — do not bind Point "I'm here" until this ships. */
+  /** RLS helper — not a client mutation RPC. */
+  pilotAssignedManifestScan: "pilot_assigned_manifest_scan",
+  /** Point Zone 1 custody ping. Call via Edge Function; do not insert scans from the client. */
   parentZone1ImHere: "parent_zone1_im_here",
 } as const;
 
@@ -39,6 +41,7 @@ export const ORBIT_TABLES = {
 
 export const ORBIT_EDGE = {
   telemetryIngress: "telemetry-ingress",
+  parentZone1ImHere: "parent_zone1_im_here",
 } as const;
 
 export const LOVABLE_READS = [
@@ -60,4 +63,9 @@ export const REALTIME_CHANNELS = {
   flares: "emergency_flares",
   manifest: "trip_manifest",
   scans: "student_scan_events",
+  zone1Custody: "student_scan_events:bus:{bus_id}",
+} as const;
+
+export const REALTIME_EVENTS = {
+  zone1Custody: "zone1_custody",
 } as const;

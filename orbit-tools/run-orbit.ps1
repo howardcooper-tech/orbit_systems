@@ -69,6 +69,52 @@ function Test-StepIncluded {
     return $false
 }
 
+function Get-OrbitStepRelativePath {
+    param($Step)
+    if ($null -ne $Step.PSObject.Properties['path'] -and -not [string]::IsNullOrWhiteSpace([string]$Step.path)) {
+        return [string]$Step.path
+    }
+    return [string]$Step.file
+}
+
+function Resolve-OrbitSqlPath {
+    param(
+        [string] $RepoRoot,
+        [string] $PhaseDir,
+        $Step
+    )
+
+    $relative = Get-OrbitStepRelativePath -Step $Step
+    if ([string]::IsNullOrWhiteSpace($relative)) {
+        throw "Manifest step is missing a SQL file path."
+    }
+
+    $normalized = $relative.Replace('/', '\')
+    if ([System.IO.Path]::IsPathRooted($normalized) -or $normalized.StartsWith('\\')) {
+        throw "Manifest SQL path must be repository-relative: $relative"
+    }
+    if ($normalized -match '(^|\\)\.\.(\\|$)') {
+        throw "Manifest SQL path must not contain '..': $relative"
+    }
+    if (-not $normalized.EndsWith('.sql', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Only .sql files may be executed: $relative"
+    }
+
+    $rootFull = [System.IO.Path]::GetFullPath($RepoRoot)
+    $baseDir = if ($null -ne $Step.PSObject.Properties['path'] -and -not [string]::IsNullOrWhiteSpace([string]$Step.path)) {
+        $rootFull
+    } else {
+        [System.IO.Path]::GetFullPath($PhaseDir)
+    }
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $baseDir $normalized))
+    $rootPrefix = $rootFull.TrimEnd('\') + '\'
+    if (-not $candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "SQL path is outside the repository: $candidate"
+    }
+
+    return $candidate
+}
+
 function Invoke-OrbitSqlFile {
     param(
         [string] $FullPath,
@@ -153,7 +199,7 @@ foreach ($key in $phaseKeys) {
         }
 
         $dir = Join-Path $DocumentsRoot $phaseDefinition.dir
-        $fullPath = Join-Path $dir $step.file
+        $fullPath = Resolve-OrbitSqlPath -RepoRoot $DocumentsRoot -PhaseDir $dir -Step $step
         $label = "Phase $key / $($step.file)"
         Invoke-OrbitSqlFile -FullPath $fullPath -Label $label
         $ran++

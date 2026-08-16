@@ -1,4 +1,4 @@
-import { createBrowserNetworkMonitor } from "./network.ts";
+import { createLteReconnectMonitor } from "./network.ts";
 import { PilotCapture } from "./capture.ts";
 import { PilotOutbox } from "./outbox.ts";
 import { createSupabaseScanClient, PilotSyncEngine } from "./uploader.ts";
@@ -7,10 +7,16 @@ import type { NetworkMonitor, SqliteDb } from "./types.ts";
 
 export { createExpoSqliteAdapter } from "./expo-sqlite.ts";
 export { createMemorySqlite } from "./memory-db.ts";
-export { createBrowserNetworkMonitor } from "./network.ts";
+export { createBrowserNetworkMonitor, createLteReconnectMonitor } from "./network.ts";
 export { PilotCapture } from "./capture.ts";
 export { PilotOutbox } from "./outbox.ts";
-export { PilotSyncEngine, createSupabaseScanClient, toStudentScanRow } from "./uploader.ts";
+export {
+  PilotSyncEngine,
+  createSupabaseScanClient,
+  toStudentScanRow,
+  isIdempotentReplay,
+  isPermanentFailure,
+} from "./uploader.ts";
 export { nextBackoffMs, staggerDelayMs } from "./backoff.ts";
 export { migratePilotOutbox, PILOT_OUTBOX_SCHEMA } from "./schema.ts";
 export type {
@@ -51,7 +57,7 @@ export async function startPilotOfflineSync(options: StartPilotOfflineSyncOption
   const engine = new PilotSyncEngine(
     outbox,
     createSupabaseScanClient(options.supabase),
-    options.network ?? createBrowserNetworkMonitor(),
+    options.network ?? createLteReconnectMonitor(),
   );
   engine.start();
 

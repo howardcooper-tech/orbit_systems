@@ -59,10 +59,17 @@ export interface NetworkMonitor {
 }
 
 export interface BackoffConfig {
+  /** First retry delay before jitter. */
   baseMs: number;
+  /** Hard cap (5 minutes). */
   maxMs: number;
   factor: number;
+  /** Per-row delay inside a drain batch (thundering-herd stagger). */
   staggerMs: number;
+  /** Symmetric jitter fraction, e.g. 0.5 => delay * [0.5, 1.5]. */
+  jitter: number;
+  /** After this many failed uploads the row is marked dead. */
+  maxAttempts: number;
 }
 
 export const DEFAULT_BACKOFF: BackoffConfig = {
@@ -70,4 +77,6 @@ export const DEFAULT_BACKOFF: BackoffConfig = {
   maxMs: 5 * 60_000,
   factor: 2,
   staggerMs: 350,
+  jitter: 0.5,
+  maxAttempts: 16,
 };

@@ -1,16 +1,18 @@
 # Orbit Systems — staging deployment plan
 
-**Production is out of scope.** Do not link, push, reset, or execute SQL against any project except staging.
+**Production is out of scope.** Do not link, push, reset, or execute SQL against any project except staging. Never point staging configuration at the production project.
 
 | Item | Value |
 |------|--------|
 | Environment | Staging only |
 | Project URL | `https://ydlwukjzqtssbzirnefs.supabase.co` |
 | Project ref | `ydlwukjzqtssbzirnefs` |
-| Canonical SQL | `orbit-phase1/`, `orbit-phase2/`, `orbit-phase3/` via `orbit-tools/manifest.json` |
-| Do not use | `supabase db push` for a greenfield staging DB |
+| Canonical deploy | `orbit-tools/run-orbit.ps1` + `orbit-tools/manifest.json` |
+| Canonical SQL | `orbit-phase1/`, `orbit-phase2/`, `orbit-phase3/`, plus Phase 3b via the runner |
+| Do not use | `supabase db push` for this greenfield bootstrap |
 | Do not use | `supabase db reset` |
 | Do not use | `-IncludeSweep` on first apply |
+| Do not deploy | `telemetry-ingress` during this database bootstrap |
 
 ---
 
@@ -20,22 +22,42 @@
 
 | File in `supabase/migrations/` | What it is |
 |--------------------------------|------------|
-| `phase_3b_lockdown.sql` | PIN hash + `verify_student_pin` |
+| `phase_3b_lockdown.sql` | PIN hash + `verify_student_pin` (applied by the runner, not by `db push`) |
 | `phase_3c_duval_wall.sql` | Duval Wall / WORM |
 | `phase_3d_transit_mode.sql` | Transit Mode |
 | `20260814000000_phase_3e_auth_tenant_jwt_hook.sql` | JWT `tenant_id` hook |
 
 Phase 1–3 core tables and Phase 3 `01`–`07` live **only** under `orbit-phase*`. Pushing migrations alone will fail (missing tables) or leave an incomplete schema.
 
-`orbit-tools/run-orbit.ps1` is the deploy runner: it executes manifest files in order with `psql` (`ORBIT_DATABASE_URL`) or `supabase db execute` (`ORBIT_USE_SUPABASE_CLI=1`).
+`orbit-tools/run-orbit.ps1` is the deploy runner. It executes manifest files in order with `psql` (`ORBIT_DATABASE_URL`) or `supabase db execute` (`ORBIT_USE_SUPABASE_CLI=1`).
 
-Phase 3b is **not** in `manifest.json`. Apply it once between Phase 3 `07` and `08`.
+Phase 3b is **in** `manifest.json` and is executed automatically by `orbit-tools/run-orbit.ps1`. It is **not** a separate manual SQL step. The manifest step is:
+
+```json
+{ "file": "phase_3b_lockdown.sql", "path": "supabase/migrations/phase_3b_lockdown.sql" }
+```
+
+That `path` is repository-relative. The runner resolves it from the repo root and applies it between Phase 3 `07_business_gates.sql` and `08_phase_3c_duval_wall.sql`. Do not run `supabase db execute -f supabase/migrations/phase_3b_lockdown.sql` as a one-off.
 
 ---
 
+## Canonical greenfield sequence
+
+Staging bootstrap must follow this exact order. `-Phase all` on the runner applies it in one pass (skipping optional/destructive files unless their flags are set):
+
+```text
+Phase 1
+→ Phase 2
+→ Phase 3 01–07
+→ Phase 3b
+→ Phase 3c
+→ Phase 3d
+→ Phase 3e
+```
+
 ## Migration order (empty staging)
 
-Skip optional/destructive files on first apply.
+Skip optional/destructive files on first apply. Do **not** pass `-IncludeSweep`.
 
 ```text
 Phase 1  orbit-phase1/01_extensions.sql
@@ -50,7 +72,7 @@ Phase 1  orbit-phase1/01_extensions.sql
       →  10_halo_alerts.sql
       →  11_archive_schema.sql
       →  12_indexes.sql
-      →  PHASE1_VERIFY.sql          (optional, read-only)
+      →  PHASE1_VERIFY.sql          (optional, read-only; use -IncludeVerify)
 
 Phase 2  orbit-phase2/01_preflight_checks.sql   (optional, read-only)
       →  02_sis_import_helpers.sql
@@ -65,7 +87,7 @@ Phase 3  orbit-phase3/01_core_functions.sql
       →  07_business_gates.sql
 
 Phase 3b supabase/migrations/phase_3b_lockdown.sql
-         (not in the runner — SQL Editor or one-off execute)
+         (runner-managed via manifest path; not a manual SQL Editor step)
 
 Phase 3c orbit-phase3/08_phase_3c_duval_wall.sql
 
@@ -82,22 +104,22 @@ Do **not** run `orbit-phase1/00_sweep_reset_staging.sql` (`-IncludeSweep`). It i
 
 All of `orbit-phase1/*`, `orbit-phase2/*`, and `orbit-phase3/01`–`07`. Those must be applied via the runner (or SQL Editor in the same order). Do not copy them into `supabase/migrations/` as part of this staging connect.
 
-Duplicates (same content, two paths):
+Phase 3b lives only at `supabase/migrations/phase_3b_lockdown.sql`. The runner applies that existing file; do not duplicate it into `orbit-phase3/`.
+
+Duplicates (same content, two paths — use the `orbit-phase3/` copies when using the runner):
 
 - `08_phase_3c_duval_wall.sql` ↔ `supabase/migrations/phase_3c_duval_wall.sql`
 - `09_transit_mode.sql` ↔ `supabase/migrations/phase_3d_transit_mode.sql`
 - `10_auth_tenant_jwt_hook.sql` ↔ `supabase/migrations/20260814000000_phase_3e_auth_tenant_jwt_hook.sql`
 
-Use the `orbit-phase3/` copies when using the runner.
-
 ---
 
 ## Operator commands (do not run until this plan is approved)
 
-From the Documents / `orbit_systems` repo root.
+From the Documents / `orbit_systems` repo root. Target **only** staging project `ydlwukjzqtssbzirnefs`. Use `orbit-tools/run-orbit.ps1`. Never point `.env`, `supabase link`, or `config.toml` at production.
 
 ```powershell
-# 1. Confirm config points at staging
+# 1. Confirm config points at staging (must be ydlwukjzqtssbzirnefs, never production)
 Get-Content supabase\config.toml | Select-String "project_id"
 
 # 2. Login (once)
@@ -112,29 +134,16 @@ supabase link --project-ref ydlwukjzqtssbzirnefs
 copy orbit-tools\.env.example orbit-tools\.env
 # Edit orbit-tools\.env — set ORBIT_DATABASE_URL to the STAGING URI.
 
-# 5. Preview only
+# 5. Preview only (includes Phase 3b automatically between 07 and 08)
 .\orbit-tools\run-orbit.ps1 -Phase all -IncludeVerify -DryRun
 
-# 6. After approval: apply (no sweep)
+# 6. After approval: apply (no sweep). Phase 3b is included; do not execute it separately.
 .\orbit-tools\run-orbit.ps1 -Phase all -IncludeVerify
-
-# 7. Phase 3b (not in the runner)
-supabase db execute -f supabase/migrations/phase_3b_lockdown.sql
-# or paste that file into Staging SQL Editor as postgres.
-
-# 8. If step 6 was run when 08–10 were already in the Phase 3 manifest,
-#    3c–3e applied in step 6. If 3b was skipped until step 7, re-run:
-.\orbit-tools\run-orbit.ps1 -Phase 3 -DryRun
 ```
 
-If the runner already executed `08`–`10` before 3b, apply 3b afterward (`IF NOT EXISTS` / `CREATE OR REPLACE` is safe). Prefer 3b **before** 3c on a greenfield DB: run Phase 1–2, Phase 3 files `01`–`07` only is **not** how the current manifest works (Phase 3 always includes `08`–`10`).
+Do **not** manually execute `supabase db execute -f supabase/migrations/phase_3b_lockdown.sql`. The runner already applies that file in the canonical position.
 
-**Greenfield workaround:** either
-
-- run `.\orbit-tools\run-orbit.ps1 -Phase all -IncludeVerify` then execute `phase_3b_lockdown.sql`, or
-- apply 1–2, then SQL Editor `01`–`07`, then 3b, then `08`–`10`.
-
-Recommended for staging empty project: **runner Phase all (no sweep), then 3b file.** 3b only adds `students.pin_hash` and `verify_student_pin`; it does not need to precede 3c for RLS.
+After the apply succeeds, validate SQL (below). Enable the Custom Access Token Hook in the Dashboard **only after** Phase 3e SQL has executed successfully **and** validation passes.
 
 ### Commands that must not be run
 
@@ -143,19 +152,20 @@ supabase db reset
 supabase db push
 supabase functions deploy
 .\orbit-tools\run-orbit.ps1 -IncludeSweep
+supabase db execute -f supabase/migrations/phase_3b_lockdown.sql
 ```
+
+`db push` is not the greenfield bootstrap path. `functions deploy` must not be used for `telemetry-ingress` during this database bootstrap.
 
 ---
 
 ## Dashboard steps (staging project only)
 
-Confirm the URL is `https://ydlwukjzqtssbzirnefs.supabase.co`.
+Confirm the URL is `https://ydlwukjzqtssbzirnefs.supabase.co`. Do not enable the hook on production from this plan.
 
-1. After 3e SQL: **Authentication → Hooks → Custom Access Token** → enable `public.custom_access_token_hook`. See `docs/AUTH_TENANT_HOOK_DEPLOY.md`.
+1. After Phase 3e SQL has succeeded **and** validation passes: **Authentication → Hooks → Custom Access Token** → enable `public.custom_access_token_hook`. See `docs/AUTH_TENANT_HOOK_DEPLOY.md`.
 2. Create at least one staff user and a `staff_profiles` row with `district_id` before expecting RLS reads.
 3. Auth → URL config: add Lovable / local origins when wiring UI (not required to apply SQL).
-
-Do not enable the hook on production from this plan.
 
 ---
 
@@ -163,7 +173,7 @@ Do not enable the hook on production from this plan.
 
 `supabase/functions/telemetry-ingress/index.ts` is **not** part of the SQL runner.
 
-Do **not** deploy it in this pass. Known defect: it inserts `position` while `bus_telemetry_logs` uses `location`. Fix before `supabase functions deploy --project-ref ydlwukjzqtssbzirnefs`.
+Do **not** deploy it during this database bootstrap. Known defect: it inserts `position` while `bus_telemetry_logs` uses `location`. Fix before any later `supabase functions deploy --project-ref ydlwukjzqtssbzirnefs`.
 
 ---
 
@@ -195,7 +205,7 @@ WHERE n.nspname = 'public' AND relkind = 'r'
 ORDER BY 1;
 ```
 
-Then run `supabase/AUTH_TENANT_HOOK_VALIDATE.sql` (read-only) and `docs/AUTH_TENANT_HOOK_TEST_PLAN.md` after the Dashboard hook is on.
+Then run `supabase/AUTH_TENANT_HOOK_VALIDATE.sql` (read-only). Run `docs/AUTH_TENANT_HOOK_TEST_PLAN.md` only after the Dashboard hook is enabled.
 
 ---
 
@@ -211,6 +221,15 @@ Staging only:
 
 ## Safety
 
-- This document targets **only** `ydlwukjzqtssbzirnefs`.
-- Production project refs and URLs must not be used with these commands.
-- `orbit-tools/.env` stays gitignored. No service-role keys in git.
+Staging deployment must:
+
+- Target project `ydlwukjzqtssbzirnefs` only (`https://ydlwukjzqtssbzirnefs.supabase.co`).
+- Use `orbit-tools/run-orbit.ps1` (not a manual Phase 3b SQL execute).
+- **Not** use `-IncludeSweep`.
+- **Not** use `supabase db reset`.
+- **Not** use `supabase db push` for this greenfield bootstrap.
+- **Not** deploy `telemetry-ingress` during this database bootstrap.
+- Enable the Custom Access Token Hook manually only after Phase 3e SQL has successfully executed and validation passes.
+- Never point staging configuration at the production project.
+
+`orbit-tools/.env` stays gitignored. No service-role keys in git.

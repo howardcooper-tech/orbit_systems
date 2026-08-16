@@ -89,6 +89,10 @@ export function createMemorySqlite(): SqliteDb {
 
     async all<T>(sql: string, params: unknown[] = []): Promise<T[]> {
       const normalized = sql.replace(/\s+/g, " ").trim();
+      if (normalized.includes("COUNT(*)")) {
+        const pending = [...rows.values()].filter((r) => r.status === "pending" || r.status === "inflight").length;
+        return [{ count: pending }] as T[];
+      }
       if (normalized.startsWith("SELECT") && normalized.includes("status IN ('pending', 'inflight')")) {
         const now = Number(params[0]);
         const limit = Number(params[1] ?? 25);
@@ -96,10 +100,6 @@ export function createMemorySqlite(): SqliteDb {
           .filter((r) => (r.status === "pending" || r.status === "inflight") && r.next_attempt_at <= now)
           .sort((a, b) => a.created_at - b.created_at)
           .slice(0, limit) as T[];
-      }
-      if (normalized.includes("COUNT(*)")) {
-        const pending = [...rows.values()].filter((r) => r.status === "pending" || r.status === "inflight").length;
-        return [{ count: pending }] as T[];
       }
       return [...rows.values()] as T[];
     },

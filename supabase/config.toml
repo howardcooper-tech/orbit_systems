@@ -23,3 +23,6 @@ major_version = 15
 [auth.hook.custom_access_token]
 enabled = true
 uri = "pg-functions://postgres/public/custom_access_token_hook"
+
+[functions.parent_zone1_im_here]
+verify_jwt = true

@@ -4,7 +4,21 @@ import type { BackoffConfig, NetworkMonitor, OutboxRow, ScanEventPayload } from 
 import { DEFAULT_BACKOFF } from "./types.ts";
 
 export interface ScanInsertClient {
-  insertScanEvent(row: Record<string, unknown>): Promise<{ ok: true } | { ok: false; status?: number; message: string }>;
+  insertScanEvent(row: Record<string, unknown>): Promise<{ ok: true } | { ok: false; status?: number; code?: string; message: string }>;
+}
+
+const PERMANENT_SQLSTATE = /^(22|23|42|PGRST)/i;
+
+export function isIdempotentReplay(code?: string, message?: string): boolean {
+  const blob = `${code ?? ""} ${message ?? ""}`;
+  return /23505|duplicate key|already exists/i.test(blob);
+}
+
+export function isPermanentFailure(code?: string, message?: string, status?: number): boolean {
+  if (isIdempotentReplay(code, message)) return false;
+  if (status === 408 || status === 429) return false;
+  if (status !== undefined && status >= 400 && status < 500) return true;
+  return PERMANENT_SQLSTATE.test(`${code ?? ""}`);
 }
 
 export function toStudentScanRow(payload: ScanEventPayload): Record<string, unknown> {
@@ -27,17 +41,21 @@ export function toStudentScanRow(payload: ScanEventPayload): Record<string, unkn
 
 export function createSupabaseScanClient(supabase: {
   from: (table: string) => {
-    insert: (row: Record<string, unknown>) => Promise<{ error: { message: string; code?: string } | null }>;
+    insert: (row: Record<string, unknown>) => Promise<{
+      error: { message: string; code?: string; status?: number } | null;
+    }>;
   };
 }): ScanInsertClient {
   return {
     async insertScanEvent(row) {
       const { error } = await supabase.from("student_scan_events").insert(row);
       if (!error) return { ok: true };
-      const permanent = /23|22|42501|PGRST/i.test(`${error.code ?? ""} ${error.message}`);
+      if (isIdempotentReplay(error.code, error.message)) return { ok: true };
+      const permanent = isPermanentFailure(error.code, error.message, error.status);
       return {
         ok: false,
-        status: permanent ? 400 : 503,
+        status: error.status ?? (permanent ? 400 : 503),
+        code: error.code,
         message: error.message,
       };
     },
@@ -48,6 +66,7 @@ export class PilotSyncEngine {
   private running = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribe: (() => void) | null = null;
+  private drainTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly outbox: PilotOutbox,
@@ -63,6 +82,7 @@ export class PilotSyncEngine {
     this.unsubscribe = this.network.subscribe((online) => {
       if (online) void this.drain();
     });
+    if (this.network.isOnline()) void this.drain();
     void this.loop();
   }
 
@@ -73,8 +93,14 @@ export class PilotSyncEngine {
     this.unsubscribe = null;
   }
 
-  async drain(): Promise<void> {
-    if (!this.network.isOnline()) return;
+  /** Serialize drains so LTE reconnect + idle loop cannot double-send the same row. */
+  drain(): Promise<void> {
+    this.drainTail = this.drainTail.then(() => this.drainBatch()).catch(() => undefined);
+    return this.drainTail;
+  }
+
+  private async drainBatch(): Promise<void> {
+    if (!this.running || !this.network.isOnline()) return;
 
     const batch = await this.outbox.due(25);
     for (let i = 0; i < batch.length; i += 1) {
@@ -110,13 +136,18 @@ export class PilotSyncEngine {
       return;
     }
 
-    if (result.status && result.status >= 400 && result.status < 500 && result.status !== 408 && result.status !== 429) {
+    if (isPermanentFailure(result.code, result.message, result.status)) {
       await this.outbox.markDead(row.id, result.message);
       return;
     }
 
     const attempt = row.attempt_count + 1;
-    const wait = nextBackoffMs(attempt, this.backoff);
+    if (attempt >= this.backoff.maxAttempts) {
+      await this.outbox.markDead(row.id, result.message);
+      return;
+    }
+
+    const wait = nextBackoffMs(row.attempt_count, this.backoff);
     await this.outbox.markRetry(row.id, attempt, Date.now() + wait, result.message);
   }
 }

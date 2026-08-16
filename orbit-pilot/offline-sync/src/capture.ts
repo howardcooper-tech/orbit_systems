@@ -6,7 +6,28 @@ type CaptureBase = Omit<ScanEventPayload, "id" | "scan_type" | "event_action" | 
   device_timestamp?: string;
 };
 
+export function requireLocation(point: GeoPoint): GeoPoint {
+  if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) {
+    throw new Error("PILOT_QUEUE: location is required before enqueue");
+  }
+  if (Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) {
+    throw new Error("PILOT_QUEUE: location is out of range");
+  }
+  return point;
+}
+
+function requireIds(input: CaptureBase): void {
+  if (!input.tenant_id || !input.student_id || !input.bus_id || !input.trip_id) {
+    throw new Error("PILOT_QUEUE: tenant_id, student_id, bus_id, and trip_id are required");
+  }
+  if (input.ble_zone !== 1 && input.ble_zone !== 2) {
+    throw new Error("PILOT_QUEUE: ble_zone must be 1 or 2");
+  }
+  requireLocation(input.location);
+}
+
 function stamp(input: CaptureBase, scanType: ScanType, action: EventAction): Omit<ScanEventPayload, "id"> & { id?: string } {
+  requireIds(input);
   return {
     ...input,
     scan_type: scanType,
@@ -43,11 +64,4 @@ export class PilotCapture {
       stamp(input, scanType, input.event_action ?? "Exited"),
     );
   }
-}
-
-export function requireLocation(point: GeoPoint): GeoPoint {
-  if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) {
-    throw new Error("PILOT_QUEUE: location is required before enqueue");
-  }
-  return point;
 }

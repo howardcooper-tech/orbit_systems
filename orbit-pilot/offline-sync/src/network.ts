@@ -1,5 +1,10 @@
 import type { NetworkMonitor } from "./types.ts";
 
+/** LTE/5G (or any IP) reconnect: browser `online`/`offline`. Tablet shells can wrap this. */
+export function createLteReconnectMonitor(): NetworkMonitor {
+  return createBrowserNetworkMonitor();
+}
+
 export function createBrowserNetworkMonitor(): NetworkMonitor {
   return {
     isOnline() {
