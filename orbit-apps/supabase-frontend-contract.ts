@@ -20,6 +20,8 @@ export const ORBIT_RPC = {
   pilotAssignedManifestScan: "pilot_assigned_manifest_scan",
   /** Point Zone 1 custody ping. Call via Edge Function; do not insert scans from the client. */
   parentZone1ImHere: "parent_zone1_im_here",
+  /** Command/Central or broken-bus Pilot. Revokes broken driver manifest RLS; grants rescue driver. */
+  transferManifestToRescue: "transfer_manifest_to_rescue",
 } as const;
 
 export const ORBIT_TABLES = {

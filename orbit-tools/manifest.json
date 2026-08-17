@@ -47,7 +47,8 @@
         { "file": "09_transit_mode.sql" },
         { "file": "10_auth_tenant_jwt_hook.sql" },
         { "file": "11_student_scan_events.sql" },
-        { "file": "12_zone1_custody_handshake.sql" }
+        { "file": "12_zone1_custody_handshake.sql" },
+        { "file": "13_rescue_bus_protocol.sql" }
       ]
     }
   }

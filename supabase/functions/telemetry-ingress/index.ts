@@ -90,11 +90,9 @@ function validateTelemetryPayload(body: Record<string, unknown>) {
 function prepareTelemetryRow(payload: TelemetryPayload) {
   return {
     bus_id: payload.bus_id,
+    location: `SRID=4326;POINT(${payload.longitude} ${payload.latitude})`,
+    device_timestamp: payload.timestamp,
     recorded_at: payload.timestamp,
-    position: {
-      type: "Point",
-      coordinates: [payload.longitude, payload.latitude],
-    },
   };
 }
 

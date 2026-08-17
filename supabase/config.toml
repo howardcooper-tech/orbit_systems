@@ -26,3 +26,6 @@ uri = "pg-functions://postgres/public/custom_access_token_hook"
 
 [functions.parent_zone1_im_here]
 verify_jwt = true
+
+[functions.telemetry-ingress]
+verify_jwt = true
