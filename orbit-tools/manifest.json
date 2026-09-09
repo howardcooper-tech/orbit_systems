@@ -118,6 +118,9 @@
         },
         {
           "file": "19_ecosystem_security_hardening.sql"
+        },
+        {
+          "file": "20_telemetry_ingress_hardening.sql"
         }
       ]
     }
