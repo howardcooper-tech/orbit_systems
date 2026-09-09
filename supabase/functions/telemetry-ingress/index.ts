@@ -10,16 +10,21 @@ const DUVAL_BOUNDS = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing required Supabase runtime environment variables: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_ANON_KEY) {
+  throw new Error("Missing required Supabase runtime environment variables.");
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: {
-    persistSession: false,
-  },
+// Service-role client: used ONLY after the caller has been independently
+// verified below (bus lookup + resource-ownership check + the final
+// insert). Never used to establish who the caller is.
+const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
 });
+
+const TELEMETRY_RATE_WINDOW_MS = 60_000;
+const TELEMETRY_MAX_EVENTS_PER_WINDOW = 600;
 
 interface TelemetryPayload {
   bus_id: string;
@@ -37,7 +42,9 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
-function validateTelemetryPayload(body: Record<string, unknown>) {
+function validateTelemetryPayload(body: Record<string, unknown>):
+  | { valid: true; payload: TelemetryPayload }
+  | { valid: false; errors: string[] } {
   const errors: string[] = [];
 
   const busId = typeof body.bus_id === "string" ? body.bus_id.trim() : "";
@@ -72,8 +79,7 @@ function validateTelemetryPayload(body: Record<string, unknown>) {
     longitude! <= DUVAL_BOUNDS.maxLongitude;
 
   if (!isInDuval) {
-    errors.push("Coordinates are outside the allowed Duval County bounds.");
-    return { valid: false, errors };
+    return { valid: false, errors: ["Coordinates are outside the allowed Duval County bounds."] };
   }
 
   return {
@@ -83,17 +89,6 @@ function validateTelemetryPayload(body: Record<string, unknown>) {
       latitude: latitude!,
       longitude: longitude!,
       timestamp: recordedAt.toISOString(),
-    } as TelemetryPayload,
-  };
-}
-
-function prepareTelemetryRow(payload: TelemetryPayload) {
-  return {
-    bus_id: payload.bus_id,
-    recorded_at: payload.timestamp,
-    position: {
-      type: "Point",
-      coordinates: [payload.longitude, payload.latitude],
     },
   };
 }
@@ -105,6 +100,33 @@ serve(async (req) => {
       headers: { "Content-Type": "application/json" },
     });
   }
+
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (!token) {
+    return new Response(JSON.stringify({ error: "Missing bearer token." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Verify the caller against their OWN token. verify_jwt=true at the
+  // platform level only guarantees *some* valid JWT was presented -- it
+  // does not tell this function who the caller is, so that identity still
+  // has to be established here before any resource-ownership check means
+  // anything.
+  const callerClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+  const { data: userData, error: userError } = await callerClient.auth.getUser(token);
+  if (userError || !userData?.user) {
+    return new Response(JSON.stringify({ error: "Invalid or expired session." }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const callerId = userData.user.id;
 
   let body: Record<string, unknown>;
   try {
@@ -124,11 +146,75 @@ serve(async (req) => {
     });
   }
 
-  const row = prepareTelemetryRow(validation.payload!);
+  const { bus_id, latitude, longitude, timestamp } = validation.payload;
 
-  const { error } = await supabase.from("bus_telemetry_logs").insert([row]);
-  if (error) {
-    console.error("Telemetry insert error:", error);
+  // Resource-ownership check, and the server-verified source of tenant_id.
+  // We do not trust a client-supplied tenant claim for this write; we
+  // derive it from the bus row itself.
+  const { data: bus, error: busError } = await adminClient
+    .from("buses")
+    .select("id, tenant_id, assigned_pilot_id, contractor_id")
+    .eq("id", bus_id)
+    .maybeSingle();
+
+  if (busError || !bus) {
+    return new Response(JSON.stringify({ error: "Bus not found." }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const { data: staffProfile } = await adminClient
+    .from("staff_profiles")
+    .select("role, contractor_id")
+    .eq("id", callerId)
+    .maybeSingle();
+
+  const isAssignedPilot = bus.assigned_pilot_id === callerId;
+  const isAuthorizedHalo =
+    staffProfile?.role === "Halo" && staffProfile.contractor_id !== null &&
+    staffProfile.contractor_id === bus.contractor_id;
+
+  if (!isAssignedPilot && !isAuthorizedHalo) {
+    return new Response(
+      JSON.stringify({ error: "Not authorized to report telemetry for this bus." }),
+      { status: 403, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const rateWindowStart = new Date(Date.now() - TELEMETRY_RATE_WINDOW_MS).toISOString();
+  const { count: recentEventCount, error: rateLimitError } = await adminClient
+    .from("bus_telemetry_logs")
+    .select("id", { count: "exact", head: true })
+    .eq("bus_id", bus_id)
+    .gte("synced_at", rateWindowStart);
+
+  if (rateLimitError) {
+    console.error("Telemetry rate-limit check error:", rateLimitError);
+    return new Response(JSON.stringify({ error: "Unable to verify telemetry ingress rate." }), {
+      status: 503,
+      headers: { "Content-Type": "application/json", "Retry-After": "5" },
+    });
+  }
+
+  if ((recentEventCount ?? 0) >= TELEMETRY_MAX_EVENTS_PER_WINDOW) {
+    return new Response(JSON.stringify({ error: "Telemetry ingress rate exceeded." }), {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "60" },
+    });
+  }
+
+  const row = {
+    bus_id,
+    location: `SRID=4326;POINT(${longitude} ${latitude})`,
+    device_timestamp: timestamp,
+    recorded_at: timestamp,
+    tenant_id: bus.tenant_id,
+  };
+
+  const { error: insertError } = await adminClient.from("bus_telemetry_logs").insert([row]);
+  if (insertError) {
+    console.error("Telemetry insert error:", insertError);
     return new Response(JSON.stringify({ error: "Unable to persist telemetry." }), {
       status: 502,
       headers: { "Content-Type": "application/json" },
