@@ -111,6 +111,7 @@ and `lock_version`.
 4. `orbit-phase3/17_bay_suite_query_plan_hardening.sql`
 5. `orbit-phase3/18_bay_dev_seed_optional.sql` only for dev/staging
 6. `orbit-phase3/19_ecosystem_security_hardening.sql`
+7. `orbit-phase3/20_telemetry_ingress_hardening.sql`
 
 Migration 14 deliberately fails closed unless the tenant JWT resolver, `BAY`
 capability function, and WORM ledger are already present.
@@ -131,6 +132,7 @@ back their generated data.
 - trigger-only function RPC revocation
 - complete foreign-key leading-index coverage
 - Edge Function browser-origin restriction to the private Lovable staging portal
+- tenant-consistent telemetry rows and a per-bus ingress rate window
 
 Authenticated `SECURITY DEFINER` RPC endpoints remain intentionally executable;
 they use explicit grants and perform tenant, role, session, and authorization
