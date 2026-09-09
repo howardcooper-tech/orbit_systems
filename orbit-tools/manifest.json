@@ -41,7 +41,12 @@
         { "file": "04_audit_triggers.sql" },
         { "file": "05_telemetry_immutable.sql" },
         { "file": "06_updated_at_triggers.sql" },
-        { "file": "07_business_gates.sql" }
+        { "file": "07_business_gates.sql" },
+        { "file": "14_bay_suite_foundation.sql" },
+        { "file": "15_bay_suite_session_hardening.sql" },
+        { "file": "16_bay_suite_rls_helper_grants.sql" },
+        { "file": "17_bay_suite_query_plan_hardening.sql" },
+        { "file": "18_bay_dev_seed_optional.sql", "optional": true, "note": "Orbit Bay simulator seed; dev/staging only" }
       ]
     }
   }
