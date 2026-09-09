@@ -55,7 +55,7 @@ function Test-StepIncluded {
     param($Step)
     if (-not $Step.optional) { return $true }
     if ($Step.destructive -and $IncludeSweep) { return $true }
-    if ($Step.file -eq '03_dev_seed_optional.sql' -and $IncludeDevSeed) { return $true }
+    if ($Step.file -like '*_dev_seed_optional.sql' -and $IncludeDevSeed) { return $true }
     if ($Step.file -eq '01_preflight_checks.sql' -and $IncludePreflight) { return $true }
     if ($Step.file -eq 'PHASE1_VERIFY.sql' -and $IncludeVerify) { return $true }
     return $false
