@@ -110,6 +110,7 @@ and `lock_version`.
 3. `orbit-phase3/16_bay_suite_rls_helper_grants.sql`
 4. `orbit-phase3/17_bay_suite_query_plan_hardening.sql`
 5. `orbit-phase3/18_bay_dev_seed_optional.sql` only for dev/staging
+6. `orbit-phase3/19_ecosystem_security_hardening.sql`
 
 Migration 14 deliberately fails closed unless the tenant JWT resolver, `BAY`
 capability function, and WORM ledger are already present.
@@ -125,8 +126,14 @@ back their generated data.
 - Pilot inspection → checkpoint → optional inline media metadata → submit
 - private Storage bucket and object-policy structure
 - post-migration security and performance advisor review
+- explicit JWT tenant gates on every public tenant-table policy
+- cross-tenant bus-inspection reference rejection
+- trigger-only function RPC revocation
+- complete foreign-key leading-index coverage
+- Edge Function browser-origin restriction to the private Lovable staging portal
 
-The only Bay security-advisor notices are the intentionally authenticated
-`SECURITY DEFINER` RPC endpoints; each endpoint performs explicit tenant, role,
-session, and authorization checks. Fresh indexes may report as unused until
-normal staging traffic exercises them.
+Authenticated `SECURITY DEFINER` RPC endpoints remain intentionally executable;
+they use explicit grants and perform tenant, role, session, and authorization
+checks. PostGIS remains extension-owned in `public` on this existing project;
+install it in `extensions` when provisioning the clean production project.
+Fresh indexes may report as unused until normal staging traffic exercises them.
