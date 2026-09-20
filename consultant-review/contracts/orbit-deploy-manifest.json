@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "Ordered Orbit Atom SQL deploy manifest. Run via orbit-tools/run-orbit.ps1 (operator/CI only).",
+  "phases": {
+    "1": {
+      "label": "Structure (tables, FKs, indexes)",
+      "dir": "orbit-phase1",
+      "steps": [
+        { "file": "00_sweep_reset_staging.sql", "optional": true, "destructive": true, "note": "Staging wipe only" },
+        { "file": "01_extensions.sql" },
+        { "file": "02_infrastructure.sql" },
+        { "file": "03_students_sis.sql" },
+        { "file": "04_fleet.sql" },
+        { "file": "05_trips.sql" },
+        { "file": "06_bay_comms.sql" },
+        { "file": "07_mesh_iot.sql" },
+        { "file": "08_emergency.sql" },
+        { "file": "09_field_routes.sql" },
+        { "file": "10_halo_alerts.sql" },
+        { "file": "11_archive_schema.sql" },
+        { "file": "12_indexes.sql" },
+        { "file": "PHASE1_VERIFY.sql", "optional": true, "note": "Read-only checks" }
+      ]
+    },
+    "2": {
+      "label": "SIS handshake / data prep",
+      "dir": "orbit-phase2",
+      "steps": [
+        { "file": "01_preflight_checks.sql", "optional": true, "note": "Read-only; safe to skip in CI" },
+        { "file": "02_sis_import_helpers.sql" },
+        { "file": "03_dev_seed_optional.sql", "optional": true, "note": "Dev/staging seed only" }
+      ]
+    },
+    "3": {
+      "label": "Brain (functions, RLS, triggers)",
+      "dir": "orbit-phase3",
+      "steps": [
+        { "file": "01_core_functions.sql" },
+        { "file": "02_enable_rls.sql" },
+        { "file": "03_rls_duval_wall.sql" },
+        { "file": "04_audit_triggers.sql" },
+        { "file": "05_telemetry_immutable.sql" },
+        { "file": "06_updated_at_triggers.sql" },
+        { "file": "07_business_gates.sql" }
+      ]
+    }
+  }
+}
