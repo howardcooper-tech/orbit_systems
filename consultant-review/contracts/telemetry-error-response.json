@@ -1,0 +1,6 @@
+{
+  "errors": [
+    "Missing or invalid latitude.",
+    "Missing or invalid timestamp."
+  ]
+}
