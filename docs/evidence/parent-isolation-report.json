@@ -1,0 +1,72 @@
+{
+  "generated_at": "2026-10-23",
+  "project_ref": "ydlwukjzqtssbzirnefs",
+  "region": "us-east-1",
+  "evidence_class": "NOT_A_HOSTED_ISOLATION_RUN",
+  "reason": "Synthetic parent.a and parent.b exist and share no students, but this session has no passwords or JWTs. No authenticated API call was made.",
+  "tests": [
+    {
+      "id": "ISO-A-READ-OWN",
+      "direction": "Parent A reads own students",
+      "endpoint": "student_guardians select parent_id = auth.uid()",
+      "expected": "only Parent A links",
+      "actual": "not executed",
+      "result": "BLOCKED",
+      "evidence": "No JWT for parent.a@orbit-sim.example.com"
+    },
+    {
+      "id": "ISO-B-READ-OWN",
+      "direction": "Parent B reads own students",
+      "endpoint": "student_guardians select parent_id = auth.uid()",
+      "expected": "only Parent B links",
+      "actual": "not executed",
+      "result": "BLOCKED",
+      "evidence": "No JWT for parent.b@orbit-sim.example.com"
+    },
+    {
+      "id": "ISO-A-READ-B-DIRECT",
+      "direction": "A reads B student by id",
+      "endpoint": "students select by id",
+      "expected": "zero rows, no student attributes",
+      "actual": "not executed",
+      "result": "BLOCKED",
+      "evidence": "Authenticated staging call not available"
+    },
+    {
+      "id": "ISO-B-READ-A-DIRECT",
+      "direction": "B reads A student by id",
+      "endpoint": "students select by id",
+      "expected": "zero rows, no student attributes",
+      "actual": "not executed",
+      "result": "BLOCKED",
+      "evidence": "Authenticated staging call not available"
+    },
+    {
+      "id": "ISO-SUBSTITUTE-PARENT",
+      "direction": "either parent supplies the other parent id",
+      "endpoint": "Point guardian reads",
+      "expected": "denied",
+      "actual": "client predicate covered by unit test only",
+      "result": "BLOCKED",
+      "evidence": "LOCAL ONLY for PointContract.isActingParent. Hosted RLS not called."
+    },
+    {
+      "id": "ISO-CROSS-DISTRICT",
+      "direction": "A and B across districts",
+      "endpoint": "tenant wall",
+      "expected": "deny",
+      "actual": "not applicable to this pair",
+      "result": "NOT APPLICABLE",
+      "evidence": "Read-only count: shared students 0, shared districts 1. These two accounts are not two districts."
+    },
+    {
+      "id": "ISO-UNAUTHENTICATED",
+      "direction": "no session",
+      "endpoint": "protected parent reads",
+      "expected": "deny",
+      "actual": "not executed",
+      "result": "BLOCKED",
+      "evidence": "No anonymous staging request was sent"
+    }
+  ]
+}
