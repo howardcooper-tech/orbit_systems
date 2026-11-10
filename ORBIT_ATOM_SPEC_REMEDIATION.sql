@@ -341,7 +341,7 @@ CREATE OR REPLACE FUNCTION public.fn_process_mesh_intelligence()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
     v_trip_id UUID;
@@ -392,7 +392,7 @@ CREATE OR REPLACE FUNCTION public.fn_monitor_rescue_proximity()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, extensions
 AS $$
 DECLARE
     v_handshake_record RECORD;

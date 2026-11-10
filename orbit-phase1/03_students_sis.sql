@@ -2,6 +2,8 @@
 
 BEGIN;
 
+SET search_path = public, extensions;
+
 -- MACRO (SIS): enrollment, legal identity, medical flags from district feed
 CREATE TABLE public.student_sis_enrollment (
     sis_student_id TEXT PRIMARY KEY,

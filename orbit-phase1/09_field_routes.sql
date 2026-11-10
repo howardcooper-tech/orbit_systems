@@ -2,6 +2,8 @@
 
 BEGIN;
 
+SET search_path = public, extensions;
+
 CREATE TABLE public.routes (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     route_name TEXT NOT NULL,

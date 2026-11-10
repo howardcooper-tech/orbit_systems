@@ -2,6 +2,8 @@
 
 BEGIN;
 
+SET search_path = public, extensions;
+
 CREATE TABLE public.emergency_flares (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     district_id UUID NOT NULL REFERENCES public.districts(id) ON DELETE CASCADE,
