@@ -2,6 +2,8 @@
 
 BEGIN;
 
+SET search_path = public, extensions;
+
 CREATE TABLE public.buses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     district_id UUID REFERENCES public.districts(id) ON DELETE SET NULL,

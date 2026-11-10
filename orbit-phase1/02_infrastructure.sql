@@ -2,6 +2,8 @@
 
 BEGIN;
 
+SET search_path = public, extensions;
+
 CREATE TABLE public.districts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
